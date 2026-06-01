@@ -1,0 +1,188 @@
+# ============================================================
+# ZoneTrend — Zone Detection Configuration
+# ============================================================
+# All zone detection algorithms read their parameters from here.
+# Change values here instead of touching the source code.
+#
+# Parameter guide is included with each setting.
+# ============================================================
+
+
+# ------------------------------------------------------------
+# Swing High / Swing Low Zone Detection
+# ------------------------------------------------------------
+swing:
+  # Number of candles to check on EACH SIDE of a swing candle.
+  # A swing high at candle i requires high[i] to be the maximum
+  # over [i-lookback ... i+lookback].
+  #
+  # Effect of changing this value:
+  #   N=3  → captures minor swings, many zones, more noise
+  #   N=5  → balanced (recommended for daily swing trading)
+  #   N=10 → only major structural levels, fewer but more significant
+  #
+  # Recommended: 5 for daily chart swing trading
+  lookback: 5
+
+  # Minimum candle body size as a fraction of ATR.
+  # Filters out near-doji candles (very small bodies) as zone origins.
+  # A doji at a swing point is an unreliable zone anchor.
+  #
+  # 0.05 = body must be at least 5% of ATR (very permissive)
+  # 0.10 = body must be at least 10% of ATR (moderate filter)
+  # 0.00 = disabled (keep all swing candles regardless of body)
+  min_body_atr_ratio: 0.05
+
+  # Save detected zones to data/zones/ after detection.
+  save_zones: true
+
+
+# ------------------------------------------------------------
+# Zone Merging
+# ------------------------------------------------------------
+merger:
+  # Maximum gap (in ATR units) between two zones of the same type
+  # that will still trigger a merge.
+  #
+  # 0.0 = only merge if zones physically overlap
+  # 0.5 = merge if gap is less than half an ATR (recommended)
+  # 1.0 = aggressive merging (fewer, wider zones)
+  #
+  # Rationale: On a daily chart with ATR=40 INR, a gap of 20 INR
+  # between two swing lows at 2480 and 2500 is not meaningful —
+  # they represent the same zone. 0.5 ATR catches these.
+  merge_distance_atr: 0.3
+
+  # Run merging pass multiple times until stable.
+  # Required for chains of 3+ overlapping zones.
+  # Leave true unless debugging.
+  iterate_to_convergence: true
+
+
+# ------------------------------------------------------------
+# Zone Strength Scoring
+# ------------------------------------------------------------
+scorer:
+  # --- Component weights (must sum to 1.0) ---
+  # These weights control how much each factor contributes to
+  # the final zone_strength score (0.0 to 1.0).
+  weights:
+    # Touch count: how many times price revisited this zone
+    # Higher = more market participants respect this zone
+    touch: 0.30
+
+    # Move magnitude: how far price moved after leaving the zone
+    # Higher = more institutional orders were at this zone
+    move: 0.35
+
+    # Freshness: how recently the zone was formed
+    # Newer zones have more unfilled pending orders
+    freshness: 0.20
+
+    # Width quality: prefer zones in the 0.3–0.8 ATR width range
+    # Too narrow = may miss price; too wide = imprecise
+    width: 0.15
+
+  # --- Touch count scoring ---
+  # Maximum number of touches that gives full score.
+  # Touches beyond this are capped (additional touches may weaken the zone).
+  max_useful_touches: 5
+
+  # ATR tolerance added around zone boundaries when detecting touches.
+  # A candle counts as a "touch" if price comes within tolerance of the zone.
+  # 0.3 = price must come within 0.3 ATR of the zone edge.
+  touch_tolerance_atr: 0.3
+
+  # --- Move magnitude scoring ---
+  # Number of ATRs of post-zone move that gives full score.
+  # A move of strong_move_threshold ATRs or more = score 1.0.
+  # 5.0 = a 5-ATR move after the zone is considered a "strong" originating move.
+  strong_move_threshold_atr: 5.0
+
+  # Number of candles ahead to measure the originating move.
+  lookahead_candles: 20
+
+  # --- Freshness scoring ---
+  # Number of candles over which freshness decays from 1.0 to minimum.
+  # 252 = approximately 1 trading year on a daily chart.
+  # After 252 candles, freshness reaches its minimum (0.1, not 0.0
+  # because old zones can still be significant).
+  freshness_decay_candles: 252
+
+  # Minimum freshness score (zones never become completely irrelevant).
+  freshness_min_score: 0.1
+
+  # --- Width quality scoring ---
+  # Ideal zone width range in ATR units (scores 1.0 in this range).
+  ideal_width_atr_min: 0.3
+  ideal_width_atr_max: 0.8
+  # Width below this is considered too narrow (data artefact risk).
+  min_width_atr: 0.1
+  # Width above this is considered too wide (zone loses specificity).
+  max_width_atr: 2.0
+
+  # --- Filtering ---
+  # Minimum zone_strength score to keep a zone after scoring.
+  # Zones below this threshold are dropped from the final output.
+  # 0.0 = keep all zones
+  # 0.2 = drop very weak zones
+  min_strength_threshold: 0.0
+
+
+# ------------------------------------------------------------
+# Nearby Zone Filter
+# (used during signal generation to focus on actionable zones)
+# ------------------------------------------------------------
+nearby_filter:
+  # How many ATRs above and below current price to include.
+  # 10.0 = include all zones within 10 ATRs of current price.
+  price_window_atr: 10.0
+
+
+# ------------------------------------------------------------
+# Cluster Zone Detection  (Phase 2 — not yet implemented)
+# ------------------------------------------------------------
+cluster:
+  # Price bin width as a fraction of ATR.
+  # Smaller bins = more precise zones, more computation.
+  bin_width_atr: 0.25
+
+  # Minimum number of candle components (O/H/L/C) in a bin
+  # for it to qualify as a zone.
+  min_density: 3
+
+  # Merge nearby cluster zones within this ATR distance.
+  merge_distance_atr: 1.0
+
+
+# ------------------------------------------------------------
+# Volume Profile Zone Detection  (Phase 2 — not yet implemented)
+# ------------------------------------------------------------
+volume_profile:
+  # Number of price bins for the volume histogram.
+  # More bins = more granular profile, more memory.
+  n_bins: 100
+
+  # A bin is a High Volume Node (HVN) if its volume is greater than
+  # hvn_percentile % of all bins.
+  # 70 = top 30% of bins by volume are considered HVNs.
+  hvn_percentile: 70
+
+  # Zone width around each HVN, in ATR units.
+  zone_width_atr: 0.5
+
+
+# ------------------------------------------------------------
+# Supply & Demand Zone Detection  (Phase 2 — not yet implemented)
+# ------------------------------------------------------------
+supply_demand:
+  # Minimum ATR multiple for a candle to qualify as a "strong move".
+  # This candle triggers a zone at the preceding base.
+  strong_move_atr_multiplier: 1.5
+
+  # Maximum body size (in ATR) for base candles.
+  # Base candles must be small (consolidation before the strong move).
+  base_candle_max_atr: 0.5
+
+  # Maximum number of base candles to look back for the base region.
+  max_base_candles: 5

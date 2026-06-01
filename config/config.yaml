@@ -1,0 +1,124 @@
+# ============================================================
+# ZoneTrend — Main Configuration File
+# ============================================================
+# All paths are relative to the project root (ZoneTrend/).
+# Symbols use Yahoo Finance format: NSE stocks end with .NS
+# ============================================================
+
+project:
+  name: ZoneTrend
+  version: "1.0"
+  description: "AI-assisted swing trading using Support/Resistance Zones and Candlestick Patterns"
+
+# ------------------------------------------------------------
+# Data settings
+# ------------------------------------------------------------
+data:
+  raw_dir: data/raw
+  processed_dir: data/processed
+  zones_dir: data/zones
+  features_dir: data/features
+  labels_dir: data/labels
+
+  start_date: "2004-01-01"
+  end_date: "2026-12-01"
+  timeframe: "1d"
+  file_format: "csv"
+
+  # Full Nifty 50 symbol list (Yahoo Finance NSE format)
+  symbols:
+    # Banking & Financial Services
+    - "HDFCBANK.NS"
+    - "ICICIBANK.NS"
+    - "KOTAKBANK.NS"
+    - "AXISBANK.NS"
+    - "SBIN.NS"
+    - "BAJFINANCE.NS"
+    - "BAJAJFINSV.NS"
+    - "HDFCLIFE.NS"
+    - "SBILIFE.NS"
+    # Information Technology
+    - "TCS.NS"
+    - "INFY.NS"
+    - "WIPRO.NS"
+    - "HCLTECH.NS"
+    - "TECHM.NS"
+    # Energy & Oil
+    - "RELIANCE.NS"
+    - "ONGC.NS"
+    - "BPCL.NS"
+    - "IOC.NS"
+    - "POWERGRID.NS"
+    - "NTPC.NS"
+    - "ADANIPORTS.NS"
+    # FMCG & Consumer
+    - "HINDUNILVR.NS"
+    - "ITC.NS"
+    - "NESTLEIND.NS"
+    - "BRITANNIA.NS"
+    - "DABUR.NS"
+    # Automobile
+    - "MARUTI.NS"
+    - "TATAMOTORS.NS"
+    - "M&M.NS"
+    - "HEROMOTOCO.NS"
+    - "BAJAJ-AUTO.NS"
+    - "EICHERMOT.NS"
+    # Pharmaceuticals
+    - "SUNPHARMA.NS"
+    - "DRREDDY.NS"
+    - "CIPLA.NS"
+    - "DIVISLAB.NS"
+    - "APOLLOHOSP.NS"
+    # Metals & Mining
+    - "TATASTEEL.NS"
+    - "JSWSTEEL.NS"
+    - "HINDALCO.NS"
+    - "COALINDIA.NS"
+    # Conglomerate & Infrastructure
+    - "LT.NS"
+    - "ULTRACEMCO.NS"
+    - "GRASIM.NS"
+    - "TITAN.NS"
+    - "ASIANPAINT.NS"
+    # Telecom
+    - "BHARTIARTL.NS"
+    # Index (market context)
+    - "^NSEI"
+
+  # Smaller list for development / quick testing
+  dev_symbols:
+    - "RELIANCE.NS"
+    - "TCS.NS"
+    - "HDFCBANK.NS"
+    - "INFY.NS"
+    - "ICICIBANK.NS"
+    - "SBIN.NS"
+    - "APOLLOHOSP.NS"
+    - "SUNPHARMA.NS"
+    - "^NSEI"
+
+# ------------------------------------------------------------
+# Preprocessing settings
+# ------------------------------------------------------------
+preprocessing:
+  atr_period: 14
+  outlier_atr_multiplier: 5.0
+  min_candles: 252
+  ffill_limit: 3
+  returns_window: 1
+  volatility_window: 20
+
+# ------------------------------------------------------------
+# Logging
+# ------------------------------------------------------------
+logging:
+  log_dir: logs
+  log_level: INFO
+  log_to_file: true
+  log_to_console: true
+
+# ------------------------------------------------------------
+# Reproducibility
+# ------------------------------------------------------------
+random_seed: 42
