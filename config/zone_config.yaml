@@ -1,188 +1,168 @@
 # ============================================================
 # ZoneTrend — Zone Detection Configuration
 # ============================================================
-# All zone detection algorithms read their parameters from here.
-# Change values here instead of touching the source code.
+# All thresholds are expressed as ATR multiples.
+# Using ATR-relative thresholds (not fixed INR values) ensures
+# the detector behaves consistently across different volatility
+# regimes and across different instruments.
 #
-# Parameter guide is included with each setting.
+# Pattern reference:
+#   RBD  →  Rally → Base → Drop   →  Supply Zone (resistance)
+#   DBR  →  Drop  → Base → Rally  →  Demand Zone (support)
+#
+# The "base" is the tight consolidation between the two legs.
+# Zone boundaries are drawn from the base candles, not the legs.
 # ============================================================
 
+zones:
 
-# ------------------------------------------------------------
-# Swing High / Swing Low Zone Detection
-# ------------------------------------------------------------
-swing:
-  # Number of candles to check on EACH SIDE of a swing candle.
-  # A swing high at candle i requires high[i] to be the maximum
-  # over [i-lookback ... i+lookback].
+  # ----------------------------------------------------------
+  # Base candle detection
+  # ----------------------------------------------------------
+  # A candle is classified as a "base candle" only if both
+  # conditions below are met simultaneously.
+
+  base_range_multiplier: 3
+  # Max allowed candle range (High - Low) as a multiple of ATR.
+  # Lower value = stricter base (tighter, quieter candles only).
+  # Higher value = more permissive (allows noisier bases).
+  # Typical range: 0.5 – 1.5
+  # Rationale: a base represents indecision / equilibrium.
+  # Candles with range > 1x ATR are too large to be called
+  # indecisive; they are already showing directional intent.
+
+  base_body_multiplier: 0.7
+  # Max allowed candle body (|Close - Open|) as a multiple of ATR.
+  # Body must be tighter than range, ensuring genuine indecision.
+  # Typical range: 0.2 – 0.7
+  # Rationale: a base with a large body candle (e.g. a strong
+  # bullish candle inside a "base") is not really a base —
+  # it is a directional move with small wicks.
+
+  min_base_length: 1
+  # Minimum number of consecutive base candles required.
+  # A single-candle base (1 candle) is valid and common — it
+  # represents a very sharp imbalance point where institutions
+  # placed orders with minimal price negotiation.
+  # Typical value: 1
+
+  max_base_length: 8
+  # Maximum number of consecutive base candles.
+  # Beyond 5 candles the consolidation becomes a ranging market
+  # rather than a supply/demand imbalance point, and the
+  # statistical edge degrades significantly.
+  # Typical range: 3 – 6
+
+  # ----------------------------------------------------------
+  # Departure leg (the strong move that exits the base)
+  # ----------------------------------------------------------
+  # This is the MOST IMPORTANT parameter.
+  # The departure leg is the evidence of the imbalance.
+  # A weak departure means institutions were not truly committed.
+
+  departure_strength: 0.7
+  # Minimum departure candle body as a multiple of ATR.
+  # The departure candle must close strong in its direction:
+  #   DBR departure → large bullish body (Close >> Open)
+  #   RBD departure → large bearish body (Open >> Close)
+  # The departure body must exceed: departure_strength × ATR.
+  # Typical range: 1.0 – 2.0
+  # Note: 1.2 means the departure body alone must be 1.2x ATR.
+  # This filters out weak, ambiguous departures.
+
+  departure_close_ratio: 0.3
+  # Minimum ratio of where Close sits within the departure candle range.
+  # For a bullish departure: (Close - Low) / (High - Low) >= this value.
+  # For a bearish departure: (High - Close) / (High - Low) >= this value.
+  # Ensures the candle CLOSED strong, not just had a wide range with a weak close.
+  # Typical range: 0.5 – 0.8
+
+  # ----------------------------------------------------------
+  # Arrival leg (the directional move into the base)
+  # ----------------------------------------------------------
+  # The arrival leg confirms that price was moving directionally
+  # before it entered the base. Without a clear arrival, the
+  # base could be a random consolidation rather than a true
+  # supply/demand imbalance.
+
+  arrival_lookback: 2
+  # How many candles before the base to examine for the arrival leg.
+  # Net price move over this window must be in the correct direction.
+  # Typical range: 3 – 10
+  # Rationale: 5 candles covers approximately one trading week —
+  # long enough to see a meaningful directional move, short enough
+  # to avoid picking up ancient trend changes.
+
+  arrival_min_move: 0.5
+  # Minimum net price move of the arrival leg, expressed as a
+  # multiple of ATR. This is measured as:
+  #   |close[base_start - 1] - close[base_start - arrival_lookback]| / ATR
+  # Typical range: 1.0 – 3.0
+  # Rationale: a move smaller than 1.5x ATR is barely directional —
+  # it could be noise. We want to see the market was clearly moving
+  # before it paused at the base.
+
+  # ----------------------------------------------------------
+  # Zone status and invalidation
+  # ----------------------------------------------------------
+
+  max_test_count: 5
+  # How many times price can re-enter a zone before the zone is
+  # considered "consumed" and removed from active tracking.
+  # Each test uses up some of the unfilled orders sitting in the zone.
+  # A zone tested 3+ times has likely had most of its orders filled.
+  # After max_test_count tests, status → 'consumed'.
+  # Typical range: 2 – 4
+
+  invalidation_mode: "close"
+  # How to trigger zone invalidation.
+  # Options:
+  #   "close"  → zone is invalid when a candle CLOSES beyond the zone boundary.
+  #              More conservative, fewer false invalidations.
+  #   "wick"   → zone is invalid when High/Low TOUCHES beyond the boundary.
+  #              More aggressive, faster invalidation.
+  # Recommendation: "close" for swing trading (daily timeframe).
+
+  # ----------------------------------------------------------
+  # Zone scoring weights
+  # ----------------------------------------------------------
+  # Each detected zone receives a strength score from 0.0 to 1.0.
+  # The score is a weighted combination of four components.
+  # Weights must sum to 1.0.
   #
-  # Effect of changing this value:
-  #   N=3  → captures minor swings, many zones, more noise
-  #   N=5  → balanced (recommended for daily swing trading)
-  #   N=10 → only major structural levels, fewer but more significant
-  #
-  # Recommended: 5 for daily chart swing trading
-  lookback: 5
+  # Use this score to rank zones, filter low-quality zones,
+  # and as a feature in downstream ML models.
 
-  # Minimum candle body size as a fraction of ATR.
-  # Filters out near-doji candles (very small bodies) as zone origins.
-  # A doji at a swing point is an unreliable zone anchor.
-  #
-  # 0.05 = body must be at least 5% of ATR (very permissive)
-  # 0.10 = body must be at least 10% of ATR (moderate filter)
-  # 0.00 = disabled (keep all swing candles regardless of body)
-  min_body_atr_ratio: 0.05
+  scoring:
+    departure_weight:      0.40
+    # Weight for departure leg strength.
+    # Highest weight because a strong, clean departure is the
+    # primary evidence of an institutional imbalance.
 
-  # Save detected zones to data/zones/ after detection.
-  save_zones: true
+    base_tightness_weight: 0.25
+    # Weight for base tightness (how tight the consolidation was).
+    # A very tight base (small range, small bodies) indicates a
+    # sharper imbalance with less price negotiation.
 
+    arrival_weight:        0.20
+    # Weight for arrival leg momentum.
+    # A stronger arrival means the market was more decisively
+    # moving before it found this zone.
 
-# ------------------------------------------------------------
-# Zone Merging
-# ------------------------------------------------------------
-merger:
-  # Maximum gap (in ATR units) between two zones of the same type
-  # that will still trigger a merge.
-  #
-  # 0.0 = only merge if zones physically overlap
-  # 0.5 = merge if gap is less than half an ATR (recommended)
-  # 1.0 = aggressive merging (fewer, wider zones)
-  #
-  # Rationale: On a daily chart with ATR=40 INR, a gap of 20 INR
-  # between two swing lows at 2480 and 2500 is not meaningful —
-  # they represent the same zone. 0.5 ATR catches these.
-  merge_distance_atr: 0.3
+    volume_weight:         0.15
+    # Weight for departure volume ratio (volume on the departure
+    # candle relative to its 20-day MA).
+    # High volume on the departure confirms institutional activity.
+    # Lower weight because volume data can be noisy.
 
-  # Run merging pass multiple times until stable.
-  # Required for chains of 3+ overlapping zones.
-  # Leave true unless debugging.
-  iterate_to_convergence: true
+  # ----------------------------------------------------------
+  # Output and filtering
+  # ----------------------------------------------------------
 
+  min_strength_threshold: 0.15
+  # Zones with a strength score below this value are dropped.
+  # This removes very weak detections that are likely noise.
+  # Set to 0.0 to keep all detected zones for research/analysis.
 
-# ------------------------------------------------------------
-# Zone Strength Scoring
-# ------------------------------------------------------------
-scorer:
-  # --- Component weights (must sum to 1.0) ---
-  # These weights control how much each factor contributes to
-  # the final zone_strength score (0.0 to 1.0).
-  weights:
-    # Touch count: how many times price revisited this zone
-    # Higher = more market participants respect this zone
-    touch: 0.30
-
-    # Move magnitude: how far price moved after leaving the zone
-    # Higher = more institutional orders were at this zone
-    move: 0.35
-
-    # Freshness: how recently the zone was formed
-    # Newer zones have more unfilled pending orders
-    freshness: 0.20
-
-    # Width quality: prefer zones in the 0.3–0.8 ATR width range
-    # Too narrow = may miss price; too wide = imprecise
-    width: 0.15
-
-  # --- Touch count scoring ---
-  # Maximum number of touches that gives full score.
-  # Touches beyond this are capped (additional touches may weaken the zone).
-  max_useful_touches: 5
-
-  # ATR tolerance added around zone boundaries when detecting touches.
-  # A candle counts as a "touch" if price comes within tolerance of the zone.
-  # 0.3 = price must come within 0.3 ATR of the zone edge.
-  touch_tolerance_atr: 0.3
-
-  # --- Move magnitude scoring ---
-  # Number of ATRs of post-zone move that gives full score.
-  # A move of strong_move_threshold ATRs or more = score 1.0.
-  # 5.0 = a 5-ATR move after the zone is considered a "strong" originating move.
-  strong_move_threshold_atr: 5.0
-
-  # Number of candles ahead to measure the originating move.
-  lookahead_candles: 20
-
-  # --- Freshness scoring ---
-  # Number of candles over which freshness decays from 1.0 to minimum.
-  # 252 = approximately 1 trading year on a daily chart.
-  # After 252 candles, freshness reaches its minimum (0.1, not 0.0
-  # because old zones can still be significant).
-  freshness_decay_candles: 252
-
-  # Minimum freshness score (zones never become completely irrelevant).
-  freshness_min_score: 0.1
-
-  # --- Width quality scoring ---
-  # Ideal zone width range in ATR units (scores 1.0 in this range).
-  ideal_width_atr_min: 0.3
-  ideal_width_atr_max: 0.8
-  # Width below this is considered too narrow (data artefact risk).
-  min_width_atr: 0.1
-  # Width above this is considered too wide (zone loses specificity).
-  max_width_atr: 2.0
-
-  # --- Filtering ---
-  # Minimum zone_strength score to keep a zone after scoring.
-  # Zones below this threshold are dropped from the final output.
-  # 0.0 = keep all zones
-  # 0.2 = drop very weak zones
-  min_strength_threshold: 0.0
-
-
-# ------------------------------------------------------------
-# Nearby Zone Filter
-# (used during signal generation to focus on actionable zones)
-# ------------------------------------------------------------
-nearby_filter:
-  # How many ATRs above and below current price to include.
-  # 10.0 = include all zones within 10 ATRs of current price.
-  price_window_atr: 10.0
-
-
-# ------------------------------------------------------------
-# Cluster Zone Detection  (Phase 2 — not yet implemented)
-# ------------------------------------------------------------
-cluster:
-  # Price bin width as a fraction of ATR.
-  # Smaller bins = more precise zones, more computation.
-  bin_width_atr: 0.25
-
-  # Minimum number of candle components (O/H/L/C) in a bin
-  # for it to qualify as a zone.
-  min_density: 3
-
-  # Merge nearby cluster zones within this ATR distance.
-  merge_distance_atr: 1.0
-
-
-# ------------------------------------------------------------
-# Volume Profile Zone Detection  (Phase 2 — not yet implemented)
-# ------------------------------------------------------------
-volume_profile:
-  # Number of price bins for the volume histogram.
-  # More bins = more granular profile, more memory.
-  n_bins: 100
-
-  # A bin is a High Volume Node (HVN) if its volume is greater than
-  # hvn_percentile % of all bins.
-  # 70 = top 30% of bins by volume are considered HVNs.
-  hvn_percentile: 70
-
-  # Zone width around each HVN, in ATR units.
-  zone_width_atr: 0.5
-
-
-# ------------------------------------------------------------
-# Supply & Demand Zone Detection  (Phase 2 — not yet implemented)
-# ------------------------------------------------------------
-supply_demand:
-  # Minimum ATR multiple for a candle to qualify as a "strong move".
-  # This candle triggers a zone at the preceding base.
-  strong_move_atr_multiplier: 1.5
-
-  # Maximum body size (in ATR) for base candles.
-  # Base candles must be small (consolidation before the strong move).
-  base_candle_max_atr: 0.5
-
-  # Maximum number of base candles to look back for the base region.
-  max_base_candles: 5
+  save_format: "csv"
+  # Format for saving zone data.  Only "csv" is currently supported.

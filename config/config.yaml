@@ -1,121 +1,56 @@
 # ============================================================
-# ZoneTrend — Main Configuration File
+# ZoneTrend — Configuration
 # ============================================================
-# All paths are relative to the project root (ZoneTrend/).
-# Symbols use Yahoo Finance format: NSE stocks end with .NS
+# One symbol at a time. Set `symbol` to the index or stock
+# you want to work with. Yahoo Finance format: NSE stocks
+# use the .NS suffix; indices use the ^ prefix.
 # ============================================================
 
 project:
   name: ZoneTrend
-  version: "1.0"
-  description: "AI-assisted swing trading using Support/Resistance Zones and Candlestick Patterns"
+  version: "2.0"
+  description: "AI-assisted swing trading — zone detection system"
 
 # ------------------------------------------------------------
-# Data settings
+# Active symbol
+# Change this to switch datasets. Only one symbol is loaded
+# at a time to keep the pipeline simple and reproducible.
 # ------------------------------------------------------------
 data:
-  raw_dir: data/raw
+  symbol: "RELIANCE.NS"         # <-- change this to switch symbols
+
+  # Common symbol reference (Yahoo Finance NSE format)
+  # Indices:   ^NSEI (Nifty 50), ^NSEBANK (Bank Nifty)
+  # Large cap: RELIANCE.NS, TCS.NS, HDFCBANK.NS, INFY.NS
+  #            ICICIBANK.NS, SBIN.NS, AXISBANK.NS, KOTAKBANK.NS
+  #            HINDUNILVR.NS, ITC.NS, BHARTIARTL.NS, LT.NS
+  #            SUNPHARMA.NS, TATAMOTORS.NS, MARUTI.NS, WIPRO.NS
+
+  start_date: "2010-01-01"
+  end_date:   "2026-12-01"
+  timeframe:  "1d"
+
+  raw_dir:       data/raw
   processed_dir: data/processed
-  zones_dir: data/zones
-  features_dir: data/features
-  labels_dir: data/labels
-
-  start_date: "2004-01-01"
-  end_date: "2026-12-01"
-  timeframe: "1d"
-  file_format: "csv"
-
-  # Full Nifty 50 symbol list (Yahoo Finance NSE format)
-  symbols:
-    # Banking & Financial Services
-    - "HDFCBANK.NS"
-    - "ICICIBANK.NS"
-    - "KOTAKBANK.NS"
-    - "AXISBANK.NS"
-    - "SBIN.NS"
-    - "BAJFINANCE.NS"
-    - "BAJAJFINSV.NS"
-    - "HDFCLIFE.NS"
-    - "SBILIFE.NS"
-    # Information Technology
-    - "TCS.NS"
-    - "INFY.NS"
-    - "WIPRO.NS"
-    - "HCLTECH.NS"
-    - "TECHM.NS"
-    # Energy & Oil
-    - "RELIANCE.NS"
-    - "ONGC.NS"
-    - "BPCL.NS"
-    - "IOC.NS"
-    - "POWERGRID.NS"
-    - "NTPC.NS"
-    - "ADANIPORTS.NS"
-    # FMCG & Consumer
-    - "HINDUNILVR.NS"
-    - "ITC.NS"
-    - "NESTLEIND.NS"
-    - "BRITANNIA.NS"
-    - "DABUR.NS"
-    # Automobile
-    - "MARUTI.NS"
-    - "TATAMOTORS.NS"
-    - "M&M.NS"
-    - "HEROMOTOCO.NS"
-    - "BAJAJ-AUTO.NS"
-    - "EICHERMOT.NS"
-    # Pharmaceuticals
-    - "SUNPHARMA.NS"
-    - "DRREDDY.NS"
-    - "CIPLA.NS"
-    - "DIVISLAB.NS"
-    - "APOLLOHOSP.NS"
-    # Metals & Mining
-    - "TATASTEEL.NS"
-    - "JSWSTEEL.NS"
-    - "HINDALCO.NS"
-    - "COALINDIA.NS"
-    # Conglomerate & Infrastructure
-    - "LT.NS"
-    - "ULTRACEMCO.NS"
-    - "GRASIM.NS"
-    - "TITAN.NS"
-    - "ASIANPAINT.NS"
-    # Telecom
-    - "BHARTIARTL.NS"
-    # Index (market context)
-    - "^NSEI"
-
-  # Smaller list for development / quick testing
-  dev_symbols:
-    - "RELIANCE.NS"
-    - "TCS.NS"
-    - "HDFCBANK.NS"
-    - "INFY.NS"
-    - "ICICIBANK.NS"
-    - "SBIN.NS"
-    - "APOLLOHOSP.NS"
-    - "SUNPHARMA.NS"
-    - "^NSEI"
+  zones_dir:     data/zones
 
 # ------------------------------------------------------------
-# Preprocessing settings
+# Preprocessing
 # ------------------------------------------------------------
 preprocessing:
-  atr_period: 14
-  outlier_atr_multiplier: 5.0
-  min_candles: 252
-  ffill_limit: 3
-  returns_window: 1
-  volatility_window: 20
+  atr_period:             14    # ATR lookback (Wilder's method)
+  outlier_atr_multiplier: 5.0  # flag candle if range > N * ATR
+  min_candles:            252  # reject if fewer rows remain after cleaning
+  ffill_limit:            3    # max consecutive NaNs to forward-fill
+  volatility_window:      20   # rolling std window for log returns
 
 # ------------------------------------------------------------
 # Logging
 # ------------------------------------------------------------
 logging:
-  log_dir: logs
-  log_level: INFO
-  log_to_file: true
+  log_dir:        logs
+  log_level:      INFO
+  log_to_file:    true
   log_to_console: true
 
 # ------------------------------------------------------------
