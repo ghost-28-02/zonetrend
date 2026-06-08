@@ -17,7 +17,7 @@ project:
 # at a time to keep the pipeline simple and reproducible.
 # ------------------------------------------------------------
 data:
-  symbol: "RELIANCE.NS"         # <-- change this to switch symbols
+  symbol: "^NSEI"         # <-- change this to switch symbols
 
   # Common symbol reference (Yahoo Finance NSE format)
   # Indices:   ^NSEI (Nifty 50), ^NSEBANK (Bank Nifty)
@@ -26,9 +26,14 @@ data:
   #            HINDUNILVR.NS, ITC.NS, BHARTIARTL.NS, LT.NS
   #            SUNPHARMA.NS, TATAMOTORS.NS, MARUTI.NS, WIPRO.NS
 
-  start_date: "2010-01-01"
+  start_date: "2015-01-01"
   end_date:   "2026-12-01"
   timeframe:  "1d"
+
+  # Weekly timeframe is fetched DIRECTLY from Yahoo Finance (not resampled from
+  # daily) and used for the zone detector's weekly-confluence features.
+  fetch_weekly:    true
+  weekly_interval: "1wk"   # Yahoo interval for the higher timeframe
 
   raw_dir:       data/raw
   processed_dir: data/processed
@@ -40,7 +45,8 @@ data:
 preprocessing:
   atr_period:             14    # ATR lookback (Wilder's method)
   outlier_atr_multiplier: 5.0  # flag candle if range > N * ATR
-  min_candles:            252  # reject if fewer rows remain after cleaning
+  min_candles:            252  # reject if fewer DAILY rows remain after cleaning
+  min_candles_weekly:     60   # relaxed gate for the weekly file (~1/5 the rows)
   ffill_limit:            3    # max consecutive NaNs to forward-fill
   volatility_window:      20   # rolling std window for log returns
 

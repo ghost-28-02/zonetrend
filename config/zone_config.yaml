@@ -6,9 +6,10 @@
 # the detector behaves consistently across different volatility
 # regimes and across different instruments.
 #
-# Pattern reference:
+# Pattern reference (reversal patterns — the two currently detected):
 #   RBD  →  Rally → Base → Drop   →  Supply Zone (resistance)
 #   DBR  →  Drop  → Base → Rally  →  Demand Zone (support)
+# (Continuation patterns RBR/DBD are NOT yet detected — see review #1.)
 #
 # The "base" is the tight consolidation between the two legs.
 # Zone boundaries are drawn from the base candles, not the legs.
@@ -22,147 +23,207 @@ zones:
   # A candle is classified as a "base candle" only if both
   # conditions below are met simultaneously.
 
-  base_range_multiplier: 3
-  # Max allowed candle range (High - Low) as a multiple of ATR.
-  # Lower value = stricter base (tighter, quieter candles only).
-  # Higher value = more permissive (allows noisier bases).
-  # Typical range: 0.5 – 1.5
-  # Rationale: a base represents indecision / equilibrium.
-  # Candles with range > 1x ATR are too large to be called
-  # indecisive; they are already showing directional intent.
+  base_range_multiplier: 1.3
+  # PER-CANDLE gate: max range (High-Low)/ATR for a SINGLE candle to count as
+  # a base candle. Kept separate from the cluster gate below so that a
+  # multi-candle consolidation is not forced down to one candle.
+  # Typical range: 1.0 – 1.5
 
-  base_body_multiplier: 0.7
+  base_cluster_multiplier: 2.5
+  # [base-location fix] AGGREGATE gate: max total span (max High - min Low)/ATR
+  # for the WHOLE base. Previously the aggregate reused base_range_multiplier
+  # (1.3), which truncated ~53 real multi-candle consolidations down to the
+  # single candle next to the departure (the "base is 1-2 candles behind"
+  # problem). A consolidation of 3-5 individually-tight candles legitimately
+  # spans ~1.5-2.2 ATR, so the cluster needs its own, larger budget.
+  # Lower it for tighter/narrower zones; raise it to capture wider bases.
+  # Typical range: 2.0 – 3.0
+
+  base_body_multiplier: 0.5
   # Max allowed candle body (|Close - Open|) as a multiple of ATR.
   # Body must be tighter than range, ensuring genuine indecision.
   # Typical range: 0.2 – 0.7
-  # Rationale: a base with a large body candle (e.g. a strong
-  # bullish candle inside a "base") is not really a base —
-  # it is a directional move with small wicks.
 
   min_base_length: 1
   # Minimum number of consecutive base candles required.
-  # A single-candle base (1 candle) is valid and common — it
-  # represents a very sharp imbalance point where institutions
-  # placed orders with minimal price negotiation.
-  # Typical value: 1
+  # A single-candle base is valid and common — a sharp imbalance point.
 
-  max_base_length: 8
-  # Maximum number of consecutive base candles.
-  # Beyond 5 candles the consolidation becomes a ranging market
-  # rather than a supply/demand imbalance point, and the
-  # statistical edge degrades significantly.
+  max_base_length: 5
+  # [base-location fix] Raised 3 -> 5 so the base can extend back over the full
+  # consolidation (e.g. a 4-candle topping cluster) instead of stopping short.
+  # Beyond ~5 it becomes a range rather than an imbalance point.
   # Typical range: 3 – 6
 
   # ----------------------------------------------------------
   # Departure leg (the strong move that exits the base)
   # ----------------------------------------------------------
-  # This is the MOST IMPORTANT parameter.
-  # The departure leg is the evidence of the imbalance.
-  # A weak departure means institutions were not truly committed.
+  # [review #2] The departure is now evaluated as a MULTI-CANDLE
+  # "leg-out", not a single candle. Two things must hold:
+  #   (a) the first post-base candle closes in-direction with at
+  #       least `departure_strength` x ATR of body (a SOFT floor), and
+  #   (b) within `departure_leg_max` candles the CLOSE is displaced at
+  #       least `departure_leg_disp` x ATR beyond the base edge.
+  # This captures genuine 2–3 candle institutional thrusts that a
+  # single-candle body test silently misses.
 
-  departure_strength: 0.7
-  # Minimum departure candle body as a multiple of ATR.
-  # The departure candle must close strong in its direction:
-  #   DBR departure → large bullish body (Close >> Open)
-  #   RBD departure → large bearish body (Open >> Close)
-  # The departure body must exceed: departure_strength × ATR.
-  # Typical range: 1.0 – 2.0
-  # Note: 1.2 means the departure body alone must be 1.2x ATR.
-  # This filters out weak, ambiguous departures.
+  departure_strength: 0.5
+  # [review #2] Re-purposed from a hard single-candle gate (was 0.9,
+  # which rejected ~73% of valid departures) to a SOFT per-candle
+  # floor on the FIRST leg-out candle's body. The real strength test
+  # is now the cumulative displacement below.
+  # Typical range: 0.3 – 0.7
 
-  departure_close_ratio: 0.3
-  # Minimum ratio of where Close sits within the departure candle range.
-  # For a bullish departure: (Close - Low) / (High - Low) >= this value.
-  # For a bearish departure: (High - Close) / (High - Low) >= this value.
-  # Ensures the candle CLOSED strong, not just had a wide range with a weak close.
+  departure_close_ratio: 0.5
+  # [review #8] Raised 0.3 -> 0.5. At 0.3 this gate was inert (it
+  # rejected zero candidates). 0.5 means the first leg-out candle must
+  # close in the stronger half of its range.
+  #   bullish: (Close - Low) / (High - Low) >= this
+  #   bearish: (High - Close) / (High - Low) >= this
   # Typical range: 0.5 – 0.8
+
+  departure_leg_max: 3
+  # [review #2] How many candles after the base to look for the
+  # cumulative leg-out displacement. Captures 1–3 candle thrusts.
+  # Typical range: 2 – 4
+
+  departure_leg_disp: 0.6
+  # [review #2 + reversal sweep §10.5] Minimum displacement of the CLOSE beyond
+  # the base edge, in ATR, within departure_leg_max candles. Set to 0.6 for the
+  # DBR/RBD-only model — captures more valid reversal departures while reaction
+  # accuracy stayed at baseline.
+  #   demand: (Close - base_top)    / ATR >= this
+  #   supply: (base_bottom - Close) / ATR >= this
+  # This is the primary "strong departure" evidence.
+  # Typical range: 0.5 – 1.0 (lower = more zones)
 
   # ----------------------------------------------------------
   # Arrival leg (the directional move into the base)
   # ----------------------------------------------------------
-  # The arrival leg confirms that price was moving directionally
-  # before it entered the base. Without a clear arrival, the
-  # base could be a random consolidation rather than a true
-  # supply/demand imbalance.
+  # [review #3] The arrival is now a SOFT requirement. The only hard
+  # gate is a net directional move of at least `arrival_min_move` x ATR
+  # over `arrival_lookback` candles (so the base sits between two legs).
+  # The old "strict candle-majority" rule was removed as a hard gate
+  # (it discarded clean V-shaped / single-bar approaches) and folded
+  # into the score as an "arrival cleanliness" component instead.
 
-  arrival_lookback: 2
-  # How many candles before the base to examine for the arrival leg.
-  # Net price move over this window must be in the correct direction.
+  arrival_mode: "reversal"
+  # Whether/what arrival leg is REQUIRED (polarity always comes from the
+  # leg-out; this controls which structures are kept):
+  #   "reversal" → require arrival OPPOSITE the leg-out → **DBR/RBD ONLY** (active)
+  #   "any"      → require any directional arrival       → adds RBR/DBD continuation
+  #   "optional" → arrival not required                  → also keeps bare base→leg-out
+  # Set to "reversal" per user request: only Drop-Base-Rally (demand) and
+  # Rally-Base-Drop (supply) reversal zones are produced. Continuation patterns
+  # (RBR/DBD) are disabled. Reversal-only params were re-tuned (review §10.5).
+
+  arrival_lookback: 6
+  # [reversal sweep §10.5] How many candles before the base to examine for the
+  # arrival leg. Set to 6 (was 4) — a slightly longer window finds the opposing
+  # leg-in for more genuine reversal setups.
   # Typical range: 3 – 10
-  # Rationale: 5 candles covers approximately one trading week —
-  # long enough to see a meaningful directional move, short enough
-  # to avoid picking up ancient trend changes.
 
-  arrival_min_move: 0.5
-  # Minimum net price move of the arrival leg, expressed as a
-  # multiple of ATR. This is measured as:
-  #   |close[base_start - 1] - close[base_start - arrival_lookback]| / ATR
-  # Typical range: 1.0 – 3.0
-  # Rationale: a move smaller than 1.5x ATR is barely directional —
-  # it could be noise. We want to see the market was clearly moving
-  # before it paused at the base.
+  arrival_min_move: 0.2
+  # [reversal sweep §10.5] Minimum net close-to-close move of the arrival leg,
+  # in ATR units:  |close[base_start-1] - close[base_start-lookback]| / ATR
+  # Set to 0.2 — a real reversal often turns on a small leg-in; 0.5 discarded
+  # valid zones with no accuracy benefit.
+  # Typical range: 0.2 – 0.8
 
   # ----------------------------------------------------------
   # Zone status and invalidation
   # ----------------------------------------------------------
 
   max_test_count: 5
-  # How many times price can re-enter a zone before the zone is
-  # considered "consumed" and removed from active tracking.
-  # Each test uses up some of the unfilled orders sitting in the zone.
-  # A zone tested 3+ times has likely had most of its orders filled.
-  # After max_test_count tests, status → 'consumed'.
-  # Typical range: 2 – 4
+  # Re-entries before a zone is 'consumed'. Typical range: 2 – 5.
 
   invalidation_mode: "close"
-  # How to trigger zone invalidation.
-  # Options:
-  #   "close"  → zone is invalid when a candle CLOSES beyond the zone boundary.
-  #              More conservative, fewer false invalidations.
-  #   "wick"   → zone is invalid when High/Low TOUCHES beyond the boundary.
-  #              More aggressive, faster invalidation.
-  # Recommendation: "close" for swing trading (daily timeframe).
+  # "close" → invalid when a candle CLOSES beyond the boundary (conservative).
+  # "wick"  → invalid when High/Low TOUCHES beyond the boundary (aggressive).
 
   # ----------------------------------------------------------
   # Zone scoring weights
   # ----------------------------------------------------------
-  # Each detected zone receives a strength score from 0.0 to 1.0.
-  # The score is a weighted combination of four components.
-  # Weights must sum to 1.0.
-  #
-  # Use this score to rank zones, filter low-quality zones,
-  # and as a feature in downstream ML models.
+  # Each zone gets a 0.0–1.0 strength score: a weighted blend of the
+  # components below. [review #9/#10] Weights no longer need to sum to
+  # 1.0 — the scorer uses only the components that are AVAILABLE for a
+  # given zone (e.g. volume is dropped on instruments where it is
+  # untrusted, trend is dropped if the MA column is missing) and
+  # renormalises the remaining weights to sum to 1.0. This prevents
+  # missing/untrusted inputs from biasing the score toward a constant.
 
   scoring:
-    departure_weight:      0.40
-    # Weight for departure leg strength.
-    # Highest weight because a strong, clean departure is the
-    # primary evidence of an institutional imbalance.
+    departure_weight:      0.40   # leg-out strength (displacement + body + close)
+    base_tightness_weight: 0.25   # how tight the base was
+    arrival_weight:        0.20   # arrival momentum + cleanliness
+    volume_weight:         0.15   # departure + base volume (see base_volume / volume.trust)
 
-    base_tightness_weight: 0.25
-    # Weight for base tightness (how tight the consolidation was).
-    # A very tight base (small range, small bodies) indicates a
-    # sharper imbalance with less price negotiation.
+  # ----------------------------------------------------------
+  # [review #10] Trend / higher-timeframe context
+  # ----------------------------------------------------------
+  # Records whether a zone is aligned with the prevailing trend
+  # (demand favoured in an uptrend, supply in a downtrend), measured
+  # by the close's signed distance from a moving average at formation.
+  # Used as a SCORING input (and a `trend_aligned` flag), never as a
+  # hard gate — counter-trend zones are down-weighted, not discarded.
+  # `ma_column` must exist in the processed data (EMA200 by default).
+  trend:
+    enabled: true
+    ma_column: "EMA200"
+    weight: 0.10
+    full_align_atr: 2.0   # distance (in ATR) from MA that counts as fully aligned (score 1.0)
 
-    arrival_weight:        0.20
-    # Weight for arrival leg momentum.
-    # A stronger arrival means the market was more decisively
-    # moving before it found this zone.
+  # ----------------------------------------------------------
+  # [review #9] Volume trust
+  # ----------------------------------------------------------
+  # Spot indices (e.g. ^NSEI) report unreliable / zero volume. When the
+  # fraction of zero/NaN-volume candles exceeds `max_zero_fraction`, the
+  # detector drops BOTH volume scoring components and renormalises the
+  # remaining weights, so volume noise cannot distort zone ranking.
+  volume:
+    max_zero_fraction: 0.01
 
-    volume_weight:         0.15
-    # Weight for departure volume ratio (volume on the departure
-    # candle relative to its 20-day MA).
-    # High volume on the departure confirms institutional activity.
-    # Lower weight because volume data can be noisy.
+  # ----------------------------------------------------------
+  # Weekly-timeframe CONFLUENCE  (multi-timeframe; causal)
+  # ----------------------------------------------------------
+  # Weekly OHLCV is fetched directly from Yahoo (config.yaml → weekly_interval)
+  # and zones are detected on it. Each DAILY zone then gets a causal feature
+  # block built only from weekly bars/zones known by its formation date:
+  #   weekly_trend_align, weekly_in_zone, weekly_dist_atr,
+  #   weekly_zone_strength, weekly_zone_fresh, weekly_confluence_score
+  #   (weekly_confirmed is kept = weekly_in_zone for backward compatibility).
+  # The 0..1 confluence score scales the strength_bonus added into strength_pit
+  # (still ML-safe, since every input is point-in-time).
+  weekly_confirmation:
+    enabled: true
+    overlap_tolerance: 0.30   # min daily-height fraction inside a weekly zone → weekly_in_zone
+    trend_ma: "EMA20"         # weekly MA column used for weekly_trend_align (must exist in weekly data)
+    strength_bonus: 0.08      # max bonus into strength_pit (× weekly_confluence_score)
+
+  # ----------------------------------------------------------
+  # Zone freshness decay  (POST-HOC ONLY — uses future test_count)
+  # ----------------------------------------------------------
+  # Multiplier indexed by test_count (0, 1, 2, 3+). Feeds ONLY the
+  # post-hoc column `adjusted_strength_posthoc` (see review #6); it is
+  # NOT part of the formation-time `strength` or `strength_pit`.
+  freshness:
+    enabled: true
+    decay_values: [1.0, 0.85, 0.65, 0.45]
+
+  # ----------------------------------------------------------
+  # Base volume scoring
+  # ----------------------------------------------------------
+  # LOW base volume is a POSITIVE signal (unfilled orders likely remain).
+  base_volume:
+    enabled: true
+    low_threshold:   0.70
+    high_threshold:  1.30
+    weight:          0.10   # carved out of volume_weight (departure gets the rest)
 
   # ----------------------------------------------------------
   # Output and filtering
   # ----------------------------------------------------------
 
-  min_strength_threshold: 0.15
-  # Zones with a strength score below this value are dropped.
-  # This removes very weak detections that are likely noise.
-  # Set to 0.0 to keep all detected zones for research/analysis.
+  min_strength_threshold: 0.0
+  # Zones with strength below this are dropped. 0.0 keeps all for research.
 
   save_format: "csv"
-  # Format for saving zone data.  Only "csv" is currently supported.

@@ -64,6 +64,11 @@ def main():
         action="store_true",
         help="Skip download step; use existing raw CSV",
     )
+    parser.add_argument(
+        "--skip-weekly",
+        action="store_true",
+        help="Skip the weekly (1wk) timeframe fetch+preprocess",
+    )
     args = parser.parse_args()
 
     symbol = args.symbol
@@ -84,18 +89,40 @@ def main():
             logger.error("Fetch failed. Aborting pipeline.")
             sys.exit(1)
 
-    # ── Step 2: Preprocess ────────────────────────────────────
-    logger.info("Step 2/2 — Preprocessing...")
+    # ── Step 2: Preprocess (daily) ────────────────────────────
+    logger.info("Step 2/3 — Preprocessing daily...")
     ok = run_preprocess(symbol, cfg, logger)
     if not ok:
         logger.error("Preprocessing failed. Aborting pipeline.")
         sys.exit(1)
 
+    # ── Step 3: Weekly timeframe ──────────────────────────────
+    # Weekly OHLCV is fetched DIRECTLY from Yahoo Finance (interval=1wk), not
+    # resampled from daily. It powers the weekly-confluence features in the
+    # zone detector. Weekly failures are non-fatal: the detector falls back to
+    # resampling if the weekly processed file is missing.
+    fetch_weekly = cfg["data"].get("fetch_weekly", True) and not args.skip_weekly
     safe = symbol.replace(".", "_").replace("^", "IDX_")
+    if fetch_weekly:
+        wk_interval = cfg["data"].get("weekly_interval", "1wk")
+        wk_min      = cfg["preprocessing"].get("min_candles_weekly", 60)
+        logger.info(f"Step 3/3 — Weekly timeframe ({wk_interval})...")
+        if args.skip_fetch:
+            logger.info("  Weekly fetch skipped (--skip-fetch)")
+        elif not fetch(symbol, cfg, logger, interval=wk_interval, suffix="_weekly"):
+            logger.warning("  Weekly fetch failed; detector will resample as fallback.")
+        if not run_preprocess(symbol, cfg, logger, suffix="_weekly",
+                              min_candles_override=wk_min):
+            logger.warning("  Weekly preprocess failed; detector will resample as fallback.")
+    else:
+        logger.info("Step 3/3 — Weekly timeframe skipped.")
+
     logger.info("=" * 60)
     logger.info(f"Data pipeline complete for {symbol}")
-    logger.info(f"  Raw data  : data/raw/{safe}.csv")
-    logger.info(f"  Processed : data/processed/{safe}.csv")
+    logger.info(f"  Raw daily       : data/raw/{safe}.csv")
+    logger.info(f"  Processed daily : data/processed/{safe}.csv")
+    if fetch_weekly:
+        logger.info(f"  Processed weekly: data/processed/{safe}_weekly.csv")
     logger.info("=" * 60)
 
 
