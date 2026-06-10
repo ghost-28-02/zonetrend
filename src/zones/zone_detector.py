@@ -338,162 +338,251 @@ def _find_bases(df: pd.DataFrame, zcfg: dict) -> list[dict]:
     return bases
 
 
+# ── Dynamic leg tracing (deep-analysis §4) ────────────────────────────────────
+
+def _peak(x: float, lo: float, hi: float, width: float) -> float:
+    """Peaked response: 1.0 inside [lo, hi], decaying linearly to 0 over `width`
+    on each side. Used so the score rewards a MODERATE value (e.g. leg-out
+    displacement 0.8-1.5 ATR), not an ever-larger one."""
+    if np.isnan(x):
+        return 0.5
+    if lo <= x <= hi:
+        return 1.0
+    if x < lo:
+        return max(0.0, 1.0 - (lo - x) / width)
+    return max(0.0, 1.0 - (x - hi) / width)
+
+
+def _trace_leg_out(opens, highs, lows, closes, vols, start_idx, direction,
+                   atr, n, max_len, pullback_atr):
+    """
+    Trace the leg-OUT forward from `start_idx` until the impulse exhausts: price
+    closes back `pullback_atr × ATR` from the running extreme, or `max_len` is hit.
+    Returns the TRUE leg (1..N candles), not a fixed window. (deep-analysis §4)
+
+    Returns dict: end_idx, candles, disp_atr, extreme_close, body_avg_atr,
+                  vol_sum, velocity
+    """
+    if start_idx >= n or atr <= 0:
+        return None
+    ext = closes[start_idx]
+    ext_idx = start_idx
+    body = 0.0
+    vol = 0.0
+    last = start_idx
+    for i in range(start_idx, min(n, start_idx + max_len)):
+        body += abs(closes[i] - opens[i])
+        vol += vols[i] if not np.isnan(vols[i]) else 0.0
+        last = i
+        if direction == "up":
+            if closes[i] > ext:
+                ext, ext_idx = closes[i], i
+            elif (ext - closes[i]) >= pullback_atr * atr:
+                break
+        else:
+            if closes[i] < ext:
+                ext, ext_idx = closes[i], i
+            elif (closes[i] - ext) >= pullback_atr * atr:
+                break
+    candles = ext_idx - start_idx + 1
+    disp = abs(ext - closes[start_idx]) / atr
+    n_used = last - start_idx + 1
+    return {
+        "end_idx":      ext_idx,
+        "candles":      candles,
+        "disp_atr":     round(disp, 4),
+        "extreme_close": float(ext),
+        "body_avg_atr": round((body / n_used) / atr, 4) if n_used > 0 else 0.0,
+        "vol_sum":      vol,
+        "velocity":     round(disp / candles, 4) if candles > 0 else 0.0,
+    }
+
+
+def _trace_leg_in(opens, highs, lows, closes, vols, end_idx, direction,
+                  atr, n, max_len, pullback_atr):
+    """
+    Trace the leg-IN BACKWARD from `end_idx` (the candle just before the base).
+    `direction` is the leg-in's own direction (demand→'down', supply→'up').
+    The origin is the swing extreme before the move into the base.
+    Returns dict: start_idx, candles, disp_atr, origin_close, velocity, vol_sum
+    """
+    if end_idx < 0 or atr <= 0:
+        return None
+    ext = closes[end_idx]
+    ext_idx = end_idx
+    vol = 0.0
+    for i in range(end_idx, max(-1, end_idx - max_len), -1):
+        vol += vols[i] if not np.isnan(vols[i]) else 0.0
+        if direction == "down":          # price fell into the base; origin is the prior HIGH
+            if closes[i] > ext:
+                ext, ext_idx = closes[i], i
+            elif (ext - closes[i]) >= pullback_atr * atr:
+                break
+        else:                             # price rose into the base; origin is the prior LOW
+            if closes[i] < ext:
+                ext, ext_idx = closes[i], i
+            elif (closes[i] - ext) >= pullback_atr * atr:
+                break
+    candles = end_idx - ext_idx + 1
+    disp = abs(closes[end_idx] - ext) / atr
+    return {
+        "start_idx":    ext_idx,
+        "candles":      candles,
+        "disp_atr":     round(disp, 4),
+        "origin_close": float(ext),
+        "velocity":     round(disp / candles, 4) if candles > 0 else 0.0,
+        "vol_sum":      vol,
+    }
+
+
 # ── Step 3: Departure check ───────────────────────────────────────────────────
 
 def _check_departure(
-    df: pd.DataFrame,
+    opens, highs, lows, closes, volratios,
     base_end_idx: int,
     zone_type: str,
     base_top: float,
     base_bottom: float,
     avg_atr: float,
+    n: int,
     dep_floor: float,
     dep_close_ratio: float,
     leg_max: int,
     leg_disp: float,
+    pullback_atr: float,
 ) -> tuple[bool, dict | None]:
     """
-    Decide whether a valid MULTI-CANDLE departure ("leg-out") follows the base.
+    Validate a DYNAMIC leg-out after the base (deep-analysis §4).
 
-    [review #2] Replaces the old single-candle body test (body >= 0.9 ATR on
-    candle base_end+1), which rejected ~73% of valid departures because real
-    institutional thrusts are frequently 2–3 candles, not one marubozu.
+    Gates (first post-base candle): in-direction, closes in the stronger half of
+    its range (>= dep_close_ratio), body >= dep_floor × ATR. Then the leg-out is
+    traced to its TRUE length (1..N candles, ending when the impulse exhausts),
+    and the leg's extreme close must clear the base edge by >= leg_disp × ATR.
 
-    Conditions
-    ----------
-    1. The FIRST post-base candle (base_end+1) closes in-direction and in the
-       stronger half of its range:
-         demand → bullish, (Close - Low)  / range >= dep_close_ratio
-         supply → bearish, (High - Close) / range >= dep_close_ratio
-    2. That first candle's body is at least ``dep_floor`` × ATR (a SOFT floor —
-       the real strength test is the cumulative displacement below).
-    3. Within ``leg_max`` candles the CLOSE is displaced at least
-       ``leg_disp`` × ATR beyond the base edge:
-         demand → (Close_k - base_top)    / ATR >= leg_disp  for some k
-         supply → (base_bottom - Close_k) / ATR >= leg_disp  for some k
+    No look-ahead: the zone is "formed" at the FIRST candle whose close clears the
+    base by leg_disp (the confirmation candle), not at base_end+1.
 
-    No look-ahead: only candles at/after base_end+1 are read, and the zone is
-    "formed" at the first leg-out candle's close (formation_idx = base_end+1).
-
-    Returns
-    -------
-    (is_valid, departure_info_dict | None)
+    Returns (is_valid, dict with leg-out metrics).
     """
-    n     = len(df)
     first = base_end_idx + 1
     if first >= n or avg_atr <= 0:
         return False, None
 
-    row   = df.iloc[first]
-    open_ = float(row["Open"])
-    close = float(row["Close"])
-    high  = float(row["High"])
-    low   = float(row["Low"])
-    rng   = high - low
+    o, c, h, l = opens[first], closes[first], highs[first], lows[first]
+    rng = h - l
     if rng < 1e-10:
         return False, None
 
+    direction = "up" if zone_type == "demand" else "down"
+
     # 1. First leg-out candle: direction + close strength
     if zone_type == "demand":
-        if close < open_:
+        if c < o:
             return False, None
-        close_ratio = (close - low) / rng
+        close_ratio = (c - l) / rng
     else:
-        if close >= open_:
+        if c >= o:
             return False, None
-        close_ratio = (high - close) / rng
+        close_ratio = (h - c) / rng
     if close_ratio < dep_close_ratio:
         return False, None
 
     # 2. Soft body floor on the first leg-out candle
-    first_body_atr = abs(close - open_) / avg_atr
+    first_body_atr = abs(c - o) / avg_atr
     if first_body_atr < dep_floor:
         return False, None
 
-    # 3. Cumulative leg-out displacement of the close beyond the base edge
-    best_disp = 0.0
-    for k in range(1, leg_max + 1):
-        di = base_end_idx + k
-        if di >= n:
-            break
-        close_k = float(df.iloc[di]["Close"])
-        disp = (
-            (close_k - base_top) / avg_atr
-            if zone_type == "demand"
-            else (base_bottom - close_k) / avg_atr
-        )
-        if disp > best_disp:
-            best_disp = disp
-    if best_disp < leg_disp:
+    # 3. Dynamic leg-out, then base-clearance test on its extreme close
+    leg = _trace_leg_out(opens, highs, lows, closes, volratios, first,
+                         direction, avg_atr, n, leg_max, pullback_atr)
+    if leg is None:
+        return False, None
+    if zone_type == "demand":
+        clearance = (leg["extreme_close"] - base_top) / avg_atr
+    else:
+        clearance = (base_bottom - leg["extreme_close"]) / avg_atr
+    if clearance < leg_disp:
         return False, None
 
+    # Formation candle = the first leg-out candle (base_end+1). The zone's price
+    # is fixed by the base; the leg-out only confirms it. (Kept at base_end+1 for
+    # continuity with the validated detector; the leg is still traced for metrics.)
+    form_idx = first
+
+    leg_vol_expansion = (leg["vol_sum"] / leg["candles"]) if leg["candles"] > 0 else np.nan
+
     return True, {
-        "dep_idx":          first,
-        "dep_body_atr":     round(first_body_atr, 4),
-        "dep_close_ratio":  round(close_ratio, 4),
-        "dep_leg_atr":      round(best_disp, 4),
-        "dep_volume_ratio": float(row.get("VolumeRatio", np.nan)),
+        "dep_idx":           form_idx,
+        "first_idx":         first,
+        "dep_body_atr":      round(first_body_atr, 4),
+        "dep_close_ratio":   round(close_ratio, 4),
+        "leg_out_clear":     round(clearance, 4),     # base-clearance (gate metric)
+        "leg_out_disp":      leg["disp_atr"],         # true leg displacement
+        "leg_out_candles":   leg["candles"],
+        "leg_out_velocity":  leg["velocity"],
+        "leg_out_end":       leg["end_idx"],
+        "leg_out_vol_exp":   round(float(leg_vol_expansion), 4) if not np.isnan(leg_vol_expansion) else np.nan,
+        "dep_volume_ratio":  float(volratios[first]) if not np.isnan(volratios[first]) else np.nan,
     }
 
 
 # ── Step 4: Arrival check ─────────────────────────────────────────────────────
 
 def _check_arrival(
-    df: pd.DataFrame,
+    opens, highs, lows, closes, volratios,
     base_start_idx: int,
+    leg_out_dir: str,
+    base_top: float,
+    base_bottom: float,
     avg_atr: float,
-    lookback: int,
+    n: int,
+    max_len: int,
+    pullback_atr: float,
     min_move: float,
-) -> tuple[bool, float, str | None, float]:
+) -> tuple[bool, dict | None]:
     """
-    Measure the arrival leg into the base — DIRECTION-AGNOSTIC.
+    Trace the DYNAMIC leg-in into the base (deep-analysis §4 + §3.3).
 
-    [review #1 + #3] The arrival no longer dictates zone polarity (that is the
-    departure's job). It only reports whether a directional leg-in exists and
-    in which direction, so the caller can classify the structure:
-        arrival opposite to leg-out  → reversal     (DBR / RBD)
-        arrival same as    leg-out   → continuation (RBR / DBD)
-    The candle-majority is returned as a soft ``cleanliness`` fraction (in the
-    arrival's own direction) for scoring, never as a hard gate.
+    The leg-in is traced to its true length (1..N candles). The reversal-direction
+    leg-in (opposite the leg-out) is tried first; a same-direction (continuation)
+    leg-in is the fallback (used only in 'any'/'optional' modes). A valid leg-in
+    must (a) displace >= min_move × ATR and (b) ORIGINATE outside the base — its
+    origin close on the far side of the base from the leg-out (replaces the literal
+    base-containment inequality, which selected worse zones).
 
-    Hard test
-    ---------
-    A directional arrival exists when the net close-to-close move over
-    ``lookback`` candles is at least ``min_move`` × ATR (in either direction).
-    Whether this is *required* is decided by the caller via ``arrival_mode``.
-
-    Returns
-    -------
-    (has_directional_arrival, arrival_move_atr, direction, cleanliness)
-        direction ∈ {"up", "down", None}
+    Returns (has_arrival, dict: arr_dir, leg_in_disp, leg_in_candles,
+             leg_in_velocity, arrival_cleanliness, origin_ok).
     """
-    start_idx = max(0, base_start_idx - lookback)
-    end_idx   = base_start_idx            # first base candle excluded
-    if end_idx - start_idx < 1 or avg_atr <= 0:
-        return False, 0.0, None, 0.0
+    end = base_start_idx - 1
+    if end < 0 or avg_atr <= 0:
+        return False, None
 
-    close_start = float(df.iloc[start_idx]["Close"])
-    close_end   = float(df.iloc[end_idx - 1]["Close"])
-    net_move    = close_end - close_start
-    move_atr    = abs(net_move) / avg_atr
-
-    if move_atr < min_move or net_move == 0:
-        return False, round(move_atr, 4), None, 0.0
-
-    direction = "up" if net_move > 0 else "down"
-
-    # Soft: fraction of arrival candles moving in the leg's own direction.
-    opens  = df.iloc[start_idx:end_idx]["Open"].values
-    closes = df.iloc[start_idx:end_idx]["Close"].values
-    nn     = len(opens)
-    if nn == 0:
-        cleanliness = 0.0
-    elif direction == "up":
-        cleanliness = float(np.sum(closes >= opens)) / nn
-    else:
-        cleanliness = float(np.sum(closes < opens)) / nn
-
-    return True, round(move_atr, 4), direction, round(cleanliness, 4)
+    rev_dir = "down" if leg_out_dir == "up" else "up"   # reversal expectation
+    for arr_dir in (rev_dir, leg_out_dir):
+        leg = _trace_leg_in(opens, highs, lows, closes, volratios, end,
+                            arr_dir, avg_atr, n, max_len, pullback_atr)
+        if leg is None or leg["disp_atr"] < min_move:
+            continue
+        origin = leg["origin_close"]
+        origin_ok = (origin > base_top) if arr_dir == "down" else (origin < base_bottom)
+        s = leg["start_idx"]
+        m = end - s + 1
+        if m > 0:
+            if arr_dir == "down":
+                clean = float(np.sum(closes[s:end + 1] < opens[s:end + 1])) / m
+            else:
+                clean = float(np.sum(closes[s:end + 1] >= opens[s:end + 1])) / m
+        else:
+            clean = 0.0
+        return True, {
+            "arr_dir":             arr_dir,
+            "leg_in_disp":         leg["disp_atr"],
+            "leg_in_candles":      leg["candles"],
+            "leg_in_velocity":     leg["velocity"],
+            "arrival_cleanliness": round(clean, 4),
+            "origin_ok":           bool(origin_ok),
+        }
+    return False, None
 
 
 # ── Priority 1 helper: Weekly timeframe ──────────────────────────────────────
@@ -865,6 +954,114 @@ def _score_zone(
     return round(min(float(total), 1.0), 4)
 
 
+def _quality_score(
+    *,
+    base_length: int,
+    base_wick_frac: float,
+    leg_out_clear: float,
+    leg_out_disp: float,
+    leg_in_velocity: float,
+    arrival_cleanliness: float,
+    has_arrival: bool,
+    disp_base_ratio: float,
+    leg_out_vol_exp: float,
+    base_volume_ratio: float,
+    trend_score: float | None,
+    zcfg: dict,
+) -> float:
+    """
+    Rebuilt 0..1 quality score (deep-analysis §7) — scaled to 0..100 as
+    `quality_score`. Fixes the inverted legacy `strength`: it favours longer/
+    wickier bases and MODERATE (peaked) leg-out displacement instead of raw
+    departure magnitude, which was anti-predictive. Freshness is intentionally
+    excluded (post-hoc / future). Available components are renormalised.
+    """
+    qw        = zcfg.get("quality_weights", {})
+    vol_trust = zcfg.get("_volume_trust", True)
+
+    # Base structure: length (1→0.4 … 4-5→1.0) + wickiness
+    len_score  = {1: 0.4, 2: 0.7, 3: 0.8}.get(int(base_length), 1.0)
+    wick_score = (0.5 if (base_wick_frac is None or np.isnan(base_wick_frac))
+                  else float(np.clip((base_wick_frac - 0.3) / 0.5, 0.0, 1.0)))
+    base_struct = 0.6 * len_score + 0.4 * wick_score
+
+    # Leg-out: PEAKED at 0.8–1.5 ATR clearance (bigger is NOT better, §5)
+    legout = _peak(leg_out_clear, 0.8, 1.5, 0.8)
+
+    # Leg-in: velocity + cleanliness (only when an arrival leg exists)
+    legin = (0.6 * float(np.clip(leg_in_velocity / 0.8, 0.0, 1.0))
+             + 0.4 * float(np.clip(arrival_cleanliness, 0.0, 1.0))) if has_arrival else None
+
+    # Displacement/base ratio: peaked near 1–1.5
+    dispb = (_peak(disp_base_ratio, 1.0, 1.5, 1.5)
+             if (disp_base_ratio is not None and not np.isnan(disp_base_ratio)) else None)
+
+    # Volume (only if trusted): leg-out expansion + low base volume
+    vol = None
+    if vol_trust:
+        vv = []
+        if leg_out_vol_exp is not None and not np.isnan(leg_out_vol_exp):
+            vv.append(min(leg_out_vol_exp / 1.5, 1.0))
+        if base_volume_ratio is not None and not np.isnan(base_volume_ratio):
+            vv.append(float(np.clip(1.0 - (base_volume_ratio - 0.7) / 0.6, 0.0, 1.0)))
+        vol = float(np.mean(vv)) if vv else None
+
+    comps = [(base_struct, qw.get("base_structure", 0.26)),
+             (legout,      qw.get("leg_out", 0.24))]
+    if legin is not None:
+        comps.append((legin, qw.get("leg_in", 0.12)))
+    if dispb is not None:
+        comps.append((dispb, qw.get("disp_base", 0.10)))
+    if trend_score is not None:
+        comps.append((float(trend_score), qw.get("trend", 0.10)))
+    if vol is not None:
+        comps.append((vol, qw.get("volume", 0.08)))
+
+    ws = sum(w for _, w in comps)
+    base_q = (sum(s * w for s, w in comps) / ws) if ws > 0 else 0.0
+    return round(min(base_q, 1.0), 4)
+
+
+# ── Zone merging (deep-analysis §9) ───────────────────────────────────────────
+
+def _merge_zones(zones: list[dict], zcfg: dict, logger=None) -> list[dict]:
+    """
+    Consolidate heavily-overlapping same-type zones that form close in time
+    (~18% of raw zones are such duplicates). Keep the highest-`quality_score`
+    member, record `merged_count`. Order-independent: greedy over formation time.
+    """
+    mcfg = zcfg.get("merge", {})
+    if not mcfg.get("enabled", True) or not zones:
+        for z in zones:
+            z.setdefault("merged_count", 1)
+        return zones
+    tol  = mcfg.get("overlap_tolerance", 0.5)
+    gap  = mcfg.get("time_gap", 60)
+
+    kept: list[dict] = []
+    for z in sorted(zones, key=lambda d: d["formation_idx"]):
+        z["merged_count"] = 1
+        hit = None
+        for m in kept:
+            if m["type"] != z["type"]:
+                continue
+            inter = min(m["top"], z["top"]) - max(m["bottom"], z["bottom"])
+            h     = min(m["top"] - m["bottom"], z["top"] - z["bottom"])
+            if h > 0 and (inter / h) >= tol and abs(z["formation_idx"] - m["formation_idx"]) <= gap:
+                hit = m
+                break
+        if hit is None:
+            kept.append(z)
+        else:
+            hit["merged_count"] += 1
+            if z["quality_score"] > hit["quality_score"]:   # promote the stronger zone
+                z["merged_count"] = hit["merged_count"]
+                kept[kept.index(hit)] = z
+    if logger:
+        logger.info(f"  Zone merge: {len(zones)} → {len(kept)} ({len(zones) - len(kept)} merged away)")
+    return kept
+
+
 # ── Step 7: Zone status tracking ──────────────────────────────────────────────
 
 def _track_zone_status(zones: list[dict], df: pd.DataFrame, zcfg: dict) -> list[dict]:
@@ -1037,13 +1234,22 @@ def detect(
     if logger:
         logger.info(f"  Candidate bases found: {len(bases)}")
 
+    # Pull numpy arrays once (deep-analysis §11 — avoid per-row df.iloc).
+    O  = df["Open"].values;  H = df["High"].values;  L = df["Low"].values
+    C  = df["Close"].values; A = df["ATR"].values
+    VR = df["VolumeRatio"].values if "VolumeRatio" in df.columns else np.full(len(df), np.nan)
+
     dep_floor    = zcfg["departure_strength"]
     dep_cr       = zcfg["departure_close_ratio"]
-    leg_max      = zcfg.get("departure_leg_max", 3)
-    leg_disp     = zcfg.get("departure_leg_disp", 1.0)
-    lookback     = zcfg["arrival_lookback"]
-    min_move     = zcfg["arrival_min_move"]
-    arrival_mode = zcfg.get("arrival_mode", "any")  # review #1: reversal | any | optional
+    leg_max      = zcfg.get("departure_leg_max", 12)
+    leg_disp     = zcfg.get("departure_leg_disp", 0.6)
+    pullback     = zcfg.get("leg_pullback_atr", 0.6)
+    min_move      = zcfg["arrival_min_move"]
+    arrival_mode  = zcfg.get("arrival_mode", "any")
+    require_origin = zcfg.get("arrival_require_origin", False)
+    require_bc    = zcfg.get("require_base_containment", True)
+    min_q         = zcfg.get("min_quality_threshold", 0.0)
+    nrows        = len(df)
 
     zones    = []
     zone_num = 1
@@ -1055,22 +1261,16 @@ def detect(
         top        = base["top"]
         bottom     = base["bottom"]
         base_range = top - bottom
+        if avg_atr <= 0:
+            continue
 
-        # ── Steps 3 & 4: departure sets polarity; arrival is decoupled ──
-        # [review #1] Zone polarity is determined by the LEG-OUT direction
-        # (bullish → demand, bearish → supply), independent of how price
-        # arrived. The arrival leg only distinguishes reversal vs continuation,
-        # so DBR/RBD (reversal) AND RBR/DBD (continuation) are all detectable.
-        # The first leg-out candle is bullish XOR bearish, so a base still
-        # yields at most one zone.
-        dep_demand, info_d = _check_departure(
-            df, base_end, "demand", top, bottom, avg_atr,
-            dep_floor, dep_cr, leg_max, leg_disp,
-        )
-        dep_supply, info_s = _check_departure(
-            df, base_end, "supply", top, bottom, avg_atr,
-            dep_floor, dep_cr, leg_max, leg_disp,
-        )
+        # ── Steps 3 & 4: departure sets polarity (dynamic leg-out) ──
+        dep_demand, info_d = _check_departure(O, H, L, C, VR, base_end, "demand",
+                                              top, bottom, avg_atr, nrows,
+                                              dep_floor, dep_cr, leg_max, leg_disp, pullback)
+        dep_supply, info_s = _check_departure(O, H, L, C, VR, base_end, "supply",
+                                              top, bottom, avg_atr, nrows,
+                                              dep_floor, dep_cr, leg_max, leg_disp, pullback)
         if dep_demand:
             zone_type, dep_info, dep_dir = "demand", info_d, "up"
         elif dep_supply:
@@ -1078,54 +1278,81 @@ def detect(
         else:
             continue
 
-        # Arrival (direction-agnostic). arrival_mode decides whether it gates:
-        #   'reversal' → require an arrival OPPOSITE the leg-out (DBR/RBD only)
-        #   'any'      → require any directional arrival (adds RBR/DBD)
-        #   'optional' → no arrival requirement (also keeps bare base→leg-out)
-        has_arr, arr_move_atr, arr_dir, arr_clean = _check_arrival(
-            df, base_start, avg_atr, lookback, min_move,
-        )
+        # ── Arrival: dynamic leg-in + origin check (§3.3/§4) ──
+        has_arr, arr = _check_arrival(O, H, L, C, VR, base_start, dep_dir, top, bottom,
+                                      avg_atr, nrows, leg_max, pullback, min_move)
+        arr_dir = arr["arr_dir"] if has_arr else None
         if arrival_mode == "reversal":
-            opposite = (
-                (dep_dir == "up"   and arr_dir == "down") or
-                (dep_dir == "down" and arr_dir == "up")
-            )
-            if not (has_arr and opposite):
+            opposite = has_arr and (
+                (dep_dir == "up" and arr_dir == "down") or
+                (dep_dir == "down" and arr_dir == "up"))
+            if not opposite:
+                continue
+            if require_origin and not arr["origin_ok"]:
                 continue
         elif arrival_mode == "any":
             if not has_arr:
                 continue
-        # 'optional' → fall through
 
-        # Structure label: <arrival><Base><departure>, e.g. DBR/RBR/RBD/DBD,
-        # or B<departure> when there is no clear arrival leg.
-        d_char = "R" if dep_dir == "up" else "D"
-        if has_arr:
-            structure = f"{'R' if arr_dir == 'up' else 'D'}B{d_char}"
-        else:
-            structure = f"B{d_char}"
+        d_char    = "R" if dep_dir == "up" else "D"
+        structure = (f"{'R' if arr_dir == 'up' else 'D'}B{d_char}") if has_arr else f"B{d_char}"
+
+        # ── Base-containment gate ──────────────────────────────
+        # The base must sit inside the imbalance, between the prior candle's OPEN
+        # and the first leg-out candle's CLOSE:
+        #   DBR (demand): base HIGH < open[prev candle]  AND  base HIGH < close[next candle]
+        #   RBD (supply): base LOW  > open[prev candle]  AND  base LOW  > close[next candle]
+        if require_bc:
+            prev_idx  = base_start - 1
+            first_dep = dep_info["first_idx"]            # = base_end + 1
+            if prev_idx < 0 or first_dep >= nrows:
+                continue
+            if zone_type == "demand":
+                if not (top < O[prev_idx] and top < C[first_dep]):
+                    continue
+            else:
+                if not (bottom > O[prev_idx] and bottom > C[first_dep]):
+                    continue
 
         dep_idx        = dep_info["dep_idx"]
         base_vol_ratio = _get_base_volume_ratio(df, base_start, base_end)
-        trend_sc       = _trend_score(df, dep_idx, zone_type, zcfg)  # review #10
+        trend_sc       = _trend_score(df, dep_idx, zone_type, zcfg)
 
-        # ── Step 6: Score (review #9/#10) ──────────────────────
+        # ── Base wickiness + hybrid distal/proximal boundaries (§6) ──
+        bb        = slice(base_start, base_end + 1)
+        body_mean = float(np.mean(np.abs(C[bb] - O[bb])))
+        rng_mean  = float(np.mean(H[bb] - L[bb]))
+        wick_frac = (1.0 - body_mean / rng_mean) if rng_mean > 0 else np.nan
+        body_top  = float(np.max(np.maximum(O[bb], C[bb])))
+        body_bot  = float(np.min(np.minimum(O[bb], C[bb])))
+        if zone_type == "demand":
+            proximal, distal = body_top, bottom     # entry near body top; stop at the low
+        else:
+            proximal, distal = body_bot, top        # entry near body bottom; stop at the high
+
+        # ── Per-leg metrics (§5) ──
+        leg_out_clear = dep_info["leg_out_clear"]
+        leg_out_disp  = dep_info["leg_out_disp"]
+        disp_base     = (leg_out_disp * avg_atr / base_range) if base_range > 0 else np.nan
+        leg_in_disp = arr["leg_in_disp"]     if has_arr else np.nan
+        leg_in_cnd  = arr["leg_in_candles"]  if has_arr else 0
+        leg_in_vel  = arr["leg_in_velocity"] if has_arr else 0.0
+        arr_clean   = arr["arrival_cleanliness"] if has_arr else 0.0
+
+        # ── Legacy strength (kept) + NEW quality score (§7) ──
         strength = _score_zone(
-            dep_body_atr        = dep_info["dep_body_atr"],
-            dep_leg_atr         = dep_info["dep_leg_atr"],
-            dep_close_ratio     = dep_info["dep_close_ratio"],
-            dep_volume_ratio    = dep_info["dep_volume_ratio"],
-            base_volume_ratio   = base_vol_ratio,
-            base_range          = base_range,
-            avg_atr             = avg_atr,
-            arrival_move_atr    = arr_move_atr if has_arr else 0.0,
-            arrival_cleanliness = arr_clean    if has_arr else 0.0,
-            has_arrival         = has_arr,
-            trend_score         = trend_sc,
-            zcfg                = zcfg,
-        )
+            dep_body_atr=dep_info["dep_body_atr"], dep_leg_atr=leg_out_clear,
+            dep_close_ratio=dep_info["dep_close_ratio"], dep_volume_ratio=dep_info["dep_volume_ratio"],
+            base_volume_ratio=base_vol_ratio, base_range=base_range, avg_atr=avg_atr,
+            arrival_move_atr=leg_in_disp if has_arr else 0.0, arrival_cleanliness=arr_clean,
+            has_arrival=has_arr, trend_score=trend_sc, zcfg=zcfg)
+        quality01 = _quality_score(
+            base_length=base["length"], base_wick_frac=wick_frac, leg_out_clear=leg_out_clear,
+            leg_out_disp=leg_out_disp, leg_in_velocity=leg_in_vel, arrival_cleanliness=arr_clean,
+            has_arrival=has_arr, disp_base_ratio=disp_base, leg_out_vol_exp=dep_info["leg_out_vol_exp"],
+            base_volume_ratio=base_vol_ratio, trend_score=trend_sc, zcfg=zcfg)
 
-        if strength < zcfg["min_strength_threshold"]:
+        if quality01 < min_q:
             continue
 
         zones.append({
@@ -1135,28 +1362,36 @@ def detect(
             "top":                      round(top, 4),
             "bottom":                   round(bottom, 4),
             "midpoint":                 round((top + bottom) / 2, 4),
+            "proximal":                 round(proximal, 4),
+            "distal":                   round(distal, 4),
             "width":                    round(base_range, 4),
             "width_atr":                round(base_range / avg_atr, 4),
-            # Formation date = close of first leg-out candle (zone "known")
             "formation_date":           df.index[dep_idx],
             "formation_idx":            dep_idx,
             "base_start_date":          df.index[base_start],
             "base_end_date":            df.index[base_end],
             "base_length":              base["length"],
+            "base_wick_frac":           round(wick_frac, 4) if not np.isnan(wick_frac) else np.nan,
             "avg_atr":                  round(avg_atr, 4),
             "departure_body_atr":       dep_info["dep_body_atr"],
-            "departure_leg_atr":        dep_info["dep_leg_atr"],
             "departure_close_ratio":    dep_info["dep_close_ratio"],
+            "leg_out_clear_atr":        leg_out_clear,
+            "leg_out_disp_atr":         leg_out_disp,
+            "leg_out_candles":          dep_info["leg_out_candles"],
+            "leg_out_velocity":         dep_info["leg_out_velocity"],
+            "leg_out_vol_exp":          dep_info["leg_out_vol_exp"],
+            "leg_in_disp_atr":          round(float(leg_in_disp), 4) if has_arr else np.nan,
+            "leg_in_candles":           leg_in_cnd if has_arr else np.nan,
+            "leg_in_velocity":          round(float(leg_in_vel), 4) if has_arr else np.nan,
+            "disp_base_ratio":          round(float(disp_base), 4) if not np.isnan(disp_base) else np.nan,
+            "arrival_cleanliness":      arr_clean if has_arr else np.nan,
             "departure_volume_ratio":   dep_info["dep_volume_ratio"],
             "base_volume_ratio":        round(float(base_vol_ratio), 4)
                                         if not np.isnan(base_vol_ratio) else np.nan,
-            "arrival_move_atr":         round(arr_move_atr, 4) if has_arr else np.nan,
-            "arrival_cleanliness":      arr_clean              if has_arr else np.nan,
-            "trend_score":              round(float(trend_sc), 4)
-                                        if trend_sc is not None else np.nan,
-            "trend_aligned":            bool(trend_sc >= 0.5)
-                                        if trend_sc is not None else False,
-            "strength":                 strength,
+            "trend_score":              round(float(trend_sc), 4) if trend_sc is not None else np.nan,
+            "trend_aligned":            bool(trend_sc >= 0.5) if trend_sc is not None else False,
+            "strength":                 strength,                 # legacy (deprecated for ranking)
+            "quality_score":            round(quality01 * 100, 2),  # NEW primary 0–100 (§7)
             # Weekly-confluence features — populated by _add_weekly_confluence
             "weekly_trend_align":        np.nan,
             "weekly_in_zone":            False,
@@ -1165,11 +1400,12 @@ def detect(
             "weekly_zone_fresh":         False,
             "weekly_confluence_score":   0.0,
             "weekly_confirmed":          False,
-            # Improvement columns — populated after status tracking
+            # Post-status columns
             "freshness_score":           1.0,
-            "strength_pit":              strength,
-            "adjusted_strength_posthoc": strength,
-            # Status fields — populated in step 7
+            "strength_pit":              round(quality01, 4),
+            "adjusted_strength_posthoc": round(quality01, 4),
+            "merged_count":              1,
+            # Status fields
             "test_count":               0,
             "status":                   "active",
             "last_test_date":           None,
@@ -1184,6 +1420,10 @@ def detect(
         if logger:
             logger.warning("  No zones detected. Try relaxing parameters in zone_config.yaml.")
         return pd.DataFrame()
+
+    # ── Zone merging (deep-analysis §9): consolidate overlapping duplicates,
+    # keeping the highest-quality member (re-IDs are stable by formation order). ──
+    zones = _merge_zones(zones, zcfg, logger=logger)
 
     # ── Step 7: Track zone status over time ────────────────────
     # Also computes freshness_score for each zone (Priority 2).
@@ -1204,17 +1444,17 @@ def detect(
                 wdf = None
         zones = _add_weekly_confluence(zones, df, wdf, zcfg, logger=logger)
 
-    # ── Strength columns (review #6: quarantine the look-ahead) ─
-    #   strength                  : formation-time, leak-free            → ML-safe
-    #   strength_pit              : strength + weekly-confluence bonus. The
-    #                               confluence score is fully CAUSAL (only weekly
-    #                               bars/zones known by formation_date)  → ML-safe
-    #   adjusted_strength_posthoc : strength_pit × freshness (freshness
-    #                               uses FUTURE test_count)              → ANALYSIS ONLY
+    # ── PIT / post-hoc columns (review #6: quarantine the look-ahead) ─
+    #   quality_score (0–100)     : NEW formation-time quality (§7), leak-free → primary ranker
+    #   strength_pit              : quality(0–1) + CAUSAL weekly-confluence bonus → ML-safe
+    #   adjusted_strength_posthoc : strength_pit × freshness (freshness uses
+    #                               FUTURE test_count)                          → ANALYSIS ONLY
+    #   strength                  : legacy score, kept for reference (do NOT rank on it)
     wc_bonus = zcfg.get("weekly_confirmation", {}).get("strength_bonus", 0.08)
     for z in zones:
+        q01   = z["quality_score"] / 100.0
         bonus = wc_bonus * float(z.get("weekly_confluence_score", 0.0))
-        z["strength_pit"] = round(min(z["strength"] + bonus, 1.0), 4)
+        z["strength_pit"] = round(min(q01 + bonus, 1.0), 4)
         z["adjusted_strength_posthoc"] = round(
             min(z["strength_pit"] * z["freshness_score"], 1.0), 4
         )

@@ -23,11 +23,13 @@ zones:
   # A candle is classified as a "base candle" only if both
   # conditions below are met simultaneously.
 
-  base_range_multiplier: 1.3
+  base_range_multiplier: 1.76
   # PER-CANDLE gate: max range (High-Low)/ATR for a SINGLE candle to count as
-  # a base candle. Kept separate from the cluster gate below so that a
-  # multi-candle consolidation is not forced down to one candle.
-  # Typical range: 1.0 – 1.5
+  # a base candle. Relaxed 1.3 -> 1.5 (admits slightly wider base candles).
+  # Note: relaxing base params raises candidate bases but tends to make bases
+  # WIDER, which the V-containment gate + leg-clearance then reject more of —
+  # so final zone count is roughly flat; reaction held/slightly improved.
+  # Typical range: 1.0 – 1.8
 
   base_cluster_multiplier: 2.5
   # [base-location fix] AGGREGATE gate: max total span (max High - min Low)/ATR
@@ -39,16 +41,17 @@ zones:
   # Lower it for tighter/narrower zones; raise it to capture wider bases.
   # Typical range: 2.0 – 3.0
 
-  base_body_multiplier: 0.5
-  # Max allowed candle body (|Close - Open|) as a multiple of ATR.
-  # Body must be tighter than range, ensuring genuine indecision.
-  # Typical range: 0.2 – 0.7
+  base_body_multiplier: 0.7
+  # Max allowed candle body (|Close - Open|) as a multiple of ATR. Relaxed
+  # 0.5 -> 0.6 (allows slightly more directional base candles).
+  # Body must stay tighter than range, ensuring genuine indecision.
+  # Typical range: 0.2 – 0.8
 
   min_base_length: 1
   # Minimum number of consecutive base candles required.
   # A single-candle base is valid and common — a sharp imbalance point.
 
-  max_base_length: 5
+  max_base_length: 3
   # [base-location fix] Raised 3 -> 5 so the base can extend back over the full
   # consolidation (e.g. a 4-candle topping cluster) instead of stopping short.
   # Beyond ~5 it becomes a range rather than an imbalance point.
@@ -81,19 +84,27 @@ zones:
   #   bearish: (High - Close) / (High - Low) >= this
   # Typical range: 0.5 – 0.8
 
-  departure_leg_max: 3
-  # [review #2] How many candles after the base to look for the
-  # cumulative leg-out displacement. Captures 1–3 candle thrusts.
-  # Typical range: 2 – 4
+  departure_leg_max: 4
+  # [deep-analysis §4, RE-TUNED] DYNAMIC leg-out cap. The leg-out is traced
+  # candle-by-candle until the impulse exhausts (a counter-close of
+  # leg_pullback_atr x ATR from the running extreme), capped here.
+  # NOTE: extending this to 12 was TESTED and HURT — 1-2 candle stalls (0.53
+  # reaction) and 7+ candle grinds (0.63) react worse than 3-4 candle legs
+  # (0.73). 4 is the empirical best (161 zones @ 0.746 vs old 176 @ 0.735).
+  # Typical range: 3 – 5.
 
-  departure_leg_disp: 0.6
-  # [review #2 + reversal sweep §10.5] Minimum displacement of the CLOSE beyond
-  # the base edge, in ATR, within departure_leg_max candles. Set to 0.6 for the
-  # DBR/RBD-only model — captures more valid reversal departures while reaction
-  # accuracy stayed at baseline.
-  #   demand: (Close - base_top)    / ATR >= this
-  #   supply: (base_bottom - Close) / ATR >= this
-  # This is the primary "strong departure" evidence.
+  leg_pullback_atr: 2.0
+  # [deep-analysis §4] A leg (in or out) is finished when price closes back
+  # leg_pullback_atr x ATR against its running extreme — this traces each leg to
+  # its TRUE length (1..N candles) for the per-leg metrics. 1.0 tested best.
+  # Typical range: 0.6 – 1.2.
+
+  departure_leg_disp: 1.0
+  # [review #2] Minimum displacement of the leg-out's extreme CLOSE beyond the
+  # base PROXIMAL edge, in ATR. The gate (don't raise it — deep-analysis §5 shows
+  # >2 ATR legs react WORSE); the score rewards the 0.8-1.5 sweet spot instead.
+  #   demand: (extreme_close - base_top)    / ATR >= this
+  #   supply: (base_bottom - extreme_close) / ATR >= this
   # Typical range: 0.5 – 1.0 (lower = more zones)
 
   # ----------------------------------------------------------
@@ -117,17 +128,26 @@ zones:
   # (RBR/DBD) are disabled. Reversal-only params were re-tuned (review §10.5).
 
   arrival_lookback: 6
-  # [reversal sweep §10.5] How many candles before the base to examine for the
-  # arrival leg. Set to 6 (was 4) — a slightly longer window finds the opposing
-  # leg-in for more genuine reversal setups.
-  # Typical range: 3 – 10
+  # [DEPRECATED] No longer used for gating — the leg-in is now traced DYNAMICALLY
+  # (departure_leg_max / leg_pullback_atr). Kept for reference only.
 
-  arrival_min_move: 0.2
-  # [reversal sweep §10.5] Minimum net close-to-close move of the arrival leg,
-  # in ATR units:  |close[base_start-1] - close[base_start-lookback]| / ATR
-  # Set to 0.2 — a real reversal often turns on a small leg-in; 0.5 discarded
-  # valid zones with no accuracy benefit.
+  arrival_min_move: 0.7
+  # Minimum displacement of the (dynamic) leg-in, in ATR. A real reversal often
+  # turns on a small leg-in; 0.5 discarded valid zones with no accuracy benefit.
   # Typical range: 0.2 – 0.8
+
+  arrival_require_origin: false
+  # [deep-analysis §3.3, TESTED] If true, the leg-in must ORIGINATE outside the
+  # base. TESTED: as a HARD gate it removed good zones and LOWERED reaction, so it
+  # defaults OFF (origin_ok is still recorded as a feature).
+
+  require_base_containment: true
+  # Base-containment gate (kept; not the removed V/inverted-V labelling). The
+  # base must sit inside the imbalance, between the prior candle's open and the
+  # first leg-out candle's close:
+  #   DBR (demand): base HIGH < open[prev candle]  AND  base HIGH < close[next candle]
+  #   RBD (supply): base LOW  > open[prev candle]  AND  base LOW  > close[next candle]
+  # Stricter -> fewer but cleaner zones. Set false to keep all (looser).
 
   # ----------------------------------------------------------
   # Zone status and invalidation
@@ -152,10 +172,35 @@ zones:
   # missing/untrusted inputs from biasing the score toward a constant.
 
   scoring:
-    departure_weight:      0.40   # leg-out strength (displacement + body + close)
-    base_tightness_weight: 0.25   # how tight the base was
-    arrival_weight:        0.20   # arrival momentum + cleanliness
-    volume_weight:         0.15   # departure + base volume (see base_volume / volume.trust)
+    departure_weight:      0.40   # (legacy `strength` only) leg-out strength
+    base_tightness_weight: 0.25   # (legacy) base tightness
+    arrival_weight:        0.20   # (legacy) arrival momentum + cleanliness
+    volume_weight:         0.15   # (legacy) departure + base volume
+
+  # ----------------------------------------------------------
+  # [deep-analysis §7] Quality score → `quality_score` (0..100)
+  # ----------------------------------------------------------
+  # Rebuilt because the legacy `strength` score was ANTI-predictive (high-strength
+  # zones reacted WORSE). Favours: longer/wickier base, MODERATE leg-out
+  # displacement (peaked, not "bigger=better"), clean leg-in,
+  # trend & volume (when available). Weights renormalise over available
+  # components. Freshness is intentionally NOT here (it is post-hoc / uses future
+  # data) — it only scales `adjusted_strength_posthoc`.
+  quality_weights:
+    base_structure: 0.26   # 0.6*length_score + 0.4*wickiness
+    leg_out:        0.24   # PEAKED at 0.8-1.5 ATR displacement
+    leg_in:         0.12   # leg-in velocity + cleanliness
+    disp_base:      0.10   # displacement/base ratio (peaked ~1-1.5)
+    trend:          0.10   # daily trend alignment (EMA200)
+    volume:         0.08   # leg-out volume expansion (when trusted)
+
+  # ----------------------------------------------------------
+  # [deep-analysis §9] Zone merging (consolidate overlapping duplicates)
+  # ----------------------------------------------------------
+  merge:
+    enabled: true
+    overlap_tolerance: 0.5   # min fractional overlap of the smaller zone
+    time_gap: 60             # only merge zones forming within this many bars
 
   # ----------------------------------------------------------
   # [review #10] Trend / higher-timeframe context
@@ -218,6 +263,34 @@ zones:
     low_threshold:   0.70
     high_threshold:  1.30
     weight:          0.10   # carved out of volume_weight (departure gets the rest)
+
+  # ----------------------------------------------------------
+  # [Priority 4] Momentum-based departure filtering
+  # ----------------------------------------------------------
+  # Validates that the departure leg has sufficient momentum to be
+  # institutional-grade. Filters out weak departures with small bodies
+  # or insufficient displacement.
+  momentum:
+    enabled: true
+    # Minimum number of CONSECUTIVE momentum candles required after the base.
+    # A "momentum candle" is one where the close moves in-direction from the
+    # open with a strong body (>= body_wick_ratio_min if checking wicks).
+    # Typical range: 2 – 4. Set to 3 for solid institutional moves.
+    min_consecutive_candles: 3
+    # Minimum ratio of cumulative leg-out displacement to base height.
+    # demand: (highest_close - base_top) / (base_top - base_bottom) >= this
+    # supply: (base_bottom - lowest_close) / (base_top - base_bottom) >= this
+    # Typical range: 1.5 – 3.0. Set to 2.0 for a 2× requirement.
+    leg_displacement_ratio: 2.0
+    # Minimum ratio of candle body to wick (optional quality gate).
+    # body_size / max_wick_size >= this; filters out weak high-wick candles.
+    # Set to 0.0 to disable. Typical range: 0.5 – 1.0.
+    body_wick_ratio_min: 0.6
+    # Weight of momentum quality in the overall zone strength score.
+    # When momentum passes, adds this bonus; when it barely passes, adds less.
+    # Set to 0.0 to use momentum only as a hard gate (never reduce strength).
+    # Typical range: 0.05 – 0.15
+    strength_bonus: 0.05
 
   # ----------------------------------------------------------
   # Output and filtering
