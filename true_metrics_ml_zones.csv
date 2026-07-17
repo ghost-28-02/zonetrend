@@ -1,0 +1,7 @@
+symbol,trades,win_rate_%,profit_factor,total_return_%,max_dd_%,sharpe,avg_R,zone_source
+^NSEI,55,32.7,0.955,6.04,9.23,-0.182,-0.018,ML_XGBoost
+RELIANCE.NS,49,34.7,1.045,7.2,8.26,0.397,0.041,ML_XGBoost
+TCS.NS,38,47.4,1.808,27.61,4.42,4.296,0.421,ML_XGBoost
+INFY.NS,24,41.7,1.419,9.67,3.42,2.005,0.25,ML_XGBoost
+HDFCBANK.NS,27,40.7,1.421,16.96,2.58,1.896,0.222,ML_XGBoost
+IDFCFIRSTB.NS,32,46.9,1.735,15.14,4.19,4.308,0.406,ML_XGBoost

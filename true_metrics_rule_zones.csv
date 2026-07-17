@@ -1,0 +1,7 @@
+symbol,trades,win_rate_%,profit_factor,total_return_%,max_dd_%,sharpe,avg_R,zone_source
+^NSEI,70,41.4,1.388,25.5,4.13,2.44,0.243,rule_based
+RELIANCE.NS,62,54.8,2.401,57.22,5.42,6.86,0.645,rule_based
+TCS.NS,54,64.8,3.735,83.72,3.56,10.465,0.944,rule_based
+INFY.NS,30,60.0,2.941,31.07,1.68,8.641,0.8,rule_based
+HDFCBANK.NS,37,59.5,3.004,42.87,2.12,6.633,0.784,rule_based
+IDFCFIRSTB.NS,42,54.8,2.401,38.49,2.4,6.834,0.643,rule_based

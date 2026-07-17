@@ -1,0 +1,33 @@
+Trade-Outcome Filter — walk-forward OOS evaluation
+=======================================================
+Dataset: 363 rule-based-zone trades, 57.6% winners
+Span   : 2015-02-10 -> 2026-06-22
+Features: 34 point-in-time only (post-hoc columns dropped)
+
+[XGBoost]
+  ROC-AUC=0.771 F1(win)=0.662
+  Unfiltered: n=300 WR=56.0% PF=2.455 avgR=+0.594
+  Filtered  : n=216 WR=70.8% PF=5.018 avgR=+1.018
+  Delta WR  : +14.8 pp, kept 72%
+
+[LogisticRegression]
+  ROC-AUC=0.815 F1(win)=0.782
+  Unfiltered: n=300 WR=56.0% PF=2.455 avgR=+0.594
+  Filtered  : n=179 WR=77.7% PF=7.483 avgR=+1.202
+  Delta WR  : +21.7 pp, kept 60%
+
+Control (shuffled labels): ROC-AUC=0.533 filter delta=+0.9pp -> no leakage
+
+Top XGBoost point-in-time features by importance:
+  freshness_score            0.2357
+  base_wick_frac             0.0471
+  leg_out_candles            0.0419
+  width_atr                  0.0393
+  leg_in_velocity            0.0345
+  departure_close_ratio      0.0339
+  avg_atr                    0.0335
+  base_length                0.0329
+  weekly_dist_atr            0.0327
+  departure_volume_ratio     0.0317
+  weekly_zone_strength       0.0316
+  weekly_confluence_score    0.0315

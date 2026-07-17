@@ -17,7 +17,7 @@ project:
 # at a time to keep the pipeline simple and reproducible.
 # ------------------------------------------------------------
 data:
-  symbol: "^NSEI"         # <-- change this to switch symbols
+  symbol: "TCS.NS"         # <-- change this to switch symbols
 
   # Common symbol reference (Yahoo Finance NSE format)
   # Indices:   ^NSEI (Nifty 50), ^NSEBANK (Bank Nifty)
@@ -28,11 +28,17 @@ data:
 
   start_date: "2015-01-01"
   end_date:   "2026-12-01"
+
   timeframe:  "1d"
+  # Bar interval for the MAIN dataset. Change ONLY this to switch timeframes.
+  # Yahoo intervals: 1d, 5d, 1wk, 1mo, 3mo (intraday: 1m..1h)
+  # Friendly aliases also accepted: daily, weekly/1week/1w,
+  # monthly/1month, quarterly/3month
+  # NOTE: "1m" means 1 MINUTE on Yahoo — use "1mo"/"1month" for monthly.
 
   # Weekly timeframe is fetched DIRECTLY from Yahoo Finance (not resampled from
   # daily) and used for the zone detector's weekly-confluence features.
-  fetch_weekly:    true
+  fetch_weekly:    false
   weekly_interval: "1wk"   # Yahoo interval for the higher timeframe
 
   raw_dir:       data/raw
@@ -45,10 +51,105 @@ data:
 preprocessing:
   atr_period:             14    # ATR lookback (Wilder's method)
   outlier_atr_multiplier: 5.0  # flag candle if range > N * ATR
-  min_candles:            252  # reject if fewer DAILY rows remain after cleaning
-  min_candles_weekly:     60   # relaxed gate for the weekly file (~1/5 the rows)
+  min_candles:            252  # SOFT gate: warn (don't reject) below this row count
+  min_candles_weekly:     60   # soft gate for the weekly file (~1/5 the rows)
   ffill_limit:            3    # max consecutive NaNs to forward-fill
   volatility_window:      20   # rolling std window for log returns
+
+# ------------------------------------------------------------
+# Backtesting
+# Change these to tune your strategy without touching any code.
+# ------------------------------------------------------------
+backtest:
+  # Zone source: "ml" uses XGBoost-detected zones (default)
+  #              "algo" uses rule-based detected zones
+  zone_source:     "ml"
+
+  # Capital & risk
+  start_capital:   1000000    # Starting capital in ₹ (500000 = ₹5 Lakh)
+  risk_pct:        0.02      # Fraction of capital to risk per trade (0.02 = 2%)
+
+  # Reward-to-risk ratio for take-profit
+  # 2.0 = target 2× your risk  (breakeven win rate = 33%)
+  # 3.0 = target 3× your risk  (breakeven win rate = 25%)  ← recommended
+  rr_ratio:        2.0
+
+  # Max days to hold a trade before forced exit at close price
+  max_hold_candles: 8
+
+  # Confirmation candle — true = wait for rejection before entering
+  # Demand: next candle must close >= proximal (bullish bounce)
+  # Supply: next candle must close <= proximal (bearish rejection)
+  # Strongly recommended — removes knife-through-butter entries
+  confirm_entry:   false
+
+  # Zone structure filter — which patterns to trade (no look-ahead bias)
+  # DBR (Drop-Base-Rally) = demand reversal  ← clear institutional footprint
+  # RBD (Rally-Base-Drop) = supply reversal  ← clear institutional footprint
+  # RBR (Rally-Base-Rally) = demand continuation (skipped)
+  # DBD (Drop-Base-Drop)   = supply continuation (skipped)
+  trade_structures: ["DBR", "RBD", "RBR", "DBD"]
+
+  # Zone quality filter (applies to strength_pit for algo zones,
+  # ml_prob for ML zones)
+  # Only trade zones with score in [min_strength, max_strength]
+  # Set both to 0.0 and 1.0 to disable filtering
+  min_strength:    0.7       # recommended: 0.65–0.70
+  max_strength:    1.0       # set lower (e.g. 0.80) to exclude obvious zones
+
+  # Execution costs
+  slippage_pct:    0.0       # entry slippage fraction (0.001 = 0.1%)
+  commission:      0.0       # flat ₹ per trade side (e.g. 20 for Zerodha)
+
+  # ── Trailing stop ────────────────────────────────────────────
+  # How it works:
+  #   Phase 1 — trade entered, stop at zone distal (or ATR-based if stop_atr_mult > 0).
+  #              Fixed target at rr_ratio×R if trail is off.
+  #              If trail is on, trail activates when price hits trail_trigger_r×R instead.
+  #   Phase 2 — trail is active (no candle skipped — real trading behaviour):
+  #               • Stop trails (atr_mult × ATR) behind best price seen
+  #               • Trade runs freely — no target cap
+  #               • Floor: active_stop >= trigger_price − floor_atr_mult × ATR
+  #                 (prevents exit too far below trigger on normal candle pullback)
+  #               • Exit when trailing stop is hit (outcome = "trail_win")
+  #
+  # enabled: false → fixed zone stop + fixed rr_ratio target (original behaviour)
+  # enabled: true  → trail activates at trail_trigger_r×R, winners run freely
+  #
+  # trail_trigger_r — ACTIVATION POINT: R-multiple at which trail turns on
+  #   2.0 = trail activates when price hits 2R  (safe  — min win = 2R)
+  #   1.5 = trail activates at 1.5R             (moderate — min win = 1.5R − floor buffer)
+  #   1.0 = trail activates at 1R               (aggressive — can cut some 2R winners)
+  #   CLI: --trail-trigger-r 2.0
+  #
+  # atr_mult — TRAIL FACTOR (Phase 2): trail distance behind best price after activation
+  #   1.0 = tight — locks profit quickly, less room to breathe
+  #   1.5 = balanced — recommended starting point for swing trading
+  #   2.0 = loose  — more room; suits wide/volatile zones (Nifty, BankNifty)
+  #   CLI: --trail-atr-mult 1.5
+  #
+  # floor_atr_mult — FLOOR BUFFER: how far below trigger the trail stop is allowed to sit
+  #   floor = trigger_price − floor_atr_mult × ATR
+  #   0.0 = no floor  (stop = pure candidate; can exit well below trigger on large ATR)
+  #   0.5 = half-ATR buffer below trigger (recommended — avoids immediate exit on activation candle)
+  #   1.0 = one full ATR below trigger    (more room on activation candle)
+  #   Higher = more tolerant on activation; lower = tighter floor guarantee
+  #   CLI: --floor-atr-mult 0.5
+  #
+  # stop_atr_mult — STOP FACTOR (Phase 1): initial stop distance from entry
+  #   0.0 = use zone distal edge as stop (original zone-based behaviour)
+  #   >0  = stop = entry ± stop_atr_mult × ATR  (ATR-based, overrides zone distal)
+  #   CLI: --stop-atr-mult 1.5
+  #
+  # (trail-atr-mult > 0 enables trailing regardless of `enabled` flag)
+  trailing_stop:
+    enabled:         true
+    trail_trigger_r: 1.5   # activation point  — trail turns on at this R-multiple
+    atr_mult:        0.1   # trail factor      — Phase 2 trail distance (ATR multiples)
+    floor_atr_mult:  0.3   # floor buffer      — floor = trigger − floor_atr_mult × ATR
+    stop_atr_mult:   0.0   # stop factor       — Phase 1 initial stop (0 = zone distal)
+
+  output_dir:      data/backtest
 
 # ------------------------------------------------------------
 # Logging

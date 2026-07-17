@@ -60,6 +60,12 @@ def main():
         help="Yahoo Finance ticker (default: value in config.yaml)",
     )
     parser.add_argument(
+        "--timeframe",
+        default=cfg["data"].get("timeframe", "1d"),
+        help="Bar interval, e.g. 1d, 1wk, 1mo, 3mo or aliases like 1month "
+             "(default: data.timeframe in config.yaml)",
+    )
+    parser.add_argument(
         "--skip-fetch",
         action="store_true",
         help="Skip download step; use existing raw CSV",
@@ -75,16 +81,18 @@ def main():
     logger = fetch_logging(cfg)
     logger.name = "data_pipeline"
 
+    timeframe = args.timeframe
+
     logger.info("=" * 60)
-    logger.info(f"ZoneTrend data pipeline | symbol={symbol}")
+    logger.info(f"ZoneTrend data pipeline | symbol={symbol} | timeframe={timeframe}")
     logger.info("=" * 60)
 
     # ── Step 1: Fetch ─────────────────────────────────────────
     if args.skip_fetch:
         logger.info("Step 1/2 — fetch skipped (--skip-fetch)")
     else:
-        logger.info("Step 1/2 — Fetching raw OHLCV data...")
-        ok = fetch(symbol, cfg, logger)
+        logger.info(f"Step 1/2 — Fetching raw OHLCV data ({timeframe})...")
+        ok = fetch(symbol, cfg, logger, interval=timeframe)
         if not ok:
             logger.error("Fetch failed. Aborting pipeline.")
             sys.exit(1)

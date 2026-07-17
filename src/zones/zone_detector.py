@@ -1,7 +1,8 @@
 """
 zone_detector.py
 ================
-Detects supply and demand zones using the RBD and DBR structural patterns.
+Detects supply and demand zones using the DBR/RBD (reversal) and
+RBR/DBD (continuation) structural patterns (controlled by arrival_mode).
 
 Theory
 ------
@@ -12,7 +13,7 @@ that price area. Unfilled institutional orders remain in the base.
 When price returns to the base, those orders re-activate — creating
 reliable support (demand) or resistance (supply).
 
-The two patterns:
+The four patterns (reversal: DBR/RBD — continuation: RBR/DBD):
 
   DBR — Drop → Base → Rally  →  Demand Zone  (support)
   ─────────────────────────────────────────
@@ -46,11 +47,14 @@ Step 3  Check the MULTI-CANDLE departure / "leg-out" (review #2):
         DBR → bullish leg-out (close pushes above base top)
         RBD → bearish leg-out (close pushes below base bottom)
 
-Step 4  Check the arrival leg (candles before the base), now a SOFT test
-        (review #3): the only hard gate is a net close-to-close move over
-        arrival_lookback candles >= arrival_min_move × ATR in-direction
-        (DBR negative, RBD positive). The candle-majority is no longer a gate;
-        it is returned as an "arrival cleanliness" fraction used in scoring.
+Step 4  Measure the leg-in (candles before the base) over a FIXED window
+        (zone_config.yaml → leg_in.lookback). Hard gate only when
+        leg_in.min_move_atr > 0: net |displacement| over the window must be
+        >= min_move_atr × ATR. Direction = sign of the net move. When
+        leg_in.enabled is false the leg-in is still MEASURED (structure
+        labels stay DBR/RBD/RBR/DBD, CSV format unchanged) but it neither
+        gates zones nor contributes to the quality score.
+        Candle-majority is returned as "arrival cleanliness" for scoring.
 
 Step 5  If steps 3 and 4 pass → record the zone.
         Zone is considered "formed" at the CLOSE of the departure candle.
@@ -65,7 +69,6 @@ Step 7  Track zone status forward in time:
         Demand zone invalidated when Close < zone bottom
         Supply zone invalidated when Close > zone top
         Each visit into the zone increments test_count.
-        After max_test_count tests, status becomes 'consumed'.
 
 Parameters
 ----------
@@ -398,43 +401,6 @@ def _trace_leg_out(opens, highs, lows, closes, vols, start_idx, direction,
     }
 
 
-def _trace_leg_in(opens, highs, lows, closes, vols, end_idx, direction,
-                  atr, n, max_len, pullback_atr):
-    """
-    Trace the leg-IN BACKWARD from `end_idx` (the candle just before the base).
-    `direction` is the leg-in's own direction (demand→'down', supply→'up').
-    The origin is the swing extreme before the move into the base.
-    Returns dict: start_idx, candles, disp_atr, origin_close, velocity, vol_sum
-    """
-    if end_idx < 0 or atr <= 0:
-        return None
-    ext = closes[end_idx]
-    ext_idx = end_idx
-    vol = 0.0
-    for i in range(end_idx, max(-1, end_idx - max_len), -1):
-        vol += vols[i] if not np.isnan(vols[i]) else 0.0
-        if direction == "down":          # price fell into the base; origin is the prior HIGH
-            if closes[i] > ext:
-                ext, ext_idx = closes[i], i
-            elif (ext - closes[i]) >= pullback_atr * atr:
-                break
-        else:                             # price rose into the base; origin is the prior LOW
-            if closes[i] < ext:
-                ext, ext_idx = closes[i], i
-            elif (closes[i] - ext) >= pullback_atr * atr:
-                break
-    candles = end_idx - ext_idx + 1
-    disp = abs(closes[end_idx] - ext) / atr
-    return {
-        "start_idx":    ext_idx,
-        "candles":      candles,
-        "disp_atr":     round(disp, 4),
-        "origin_close": float(ext),
-        "velocity":     round(disp / candles, 4) if candles > 0 else 0.0,
-        "vol_sum":      vol,
-    }
-
-
 # ── Step 3: Departure check ───────────────────────────────────────────────────
 
 def _check_departure(
@@ -536,19 +502,26 @@ def _check_arrival(
     base_bottom: float,
     avg_atr: float,
     n: int,
-    max_len: int,
-    pullback_atr: float,
+    lookback: int,
     min_move: float,
 ) -> tuple[bool, dict | None]:
     """
-    Trace the DYNAMIC leg-in into the base (deep-analysis §4 + §3.3).
+    Measure the leg-in over a FIXED, config-tunable window before the base.
 
-    The leg-in is traced to its true length (1..N candles). The reversal-direction
-    leg-in (opposite the leg-out) is tried first; a same-direction (continuation)
-    leg-in is the fallback (used only in 'any'/'optional' modes). A valid leg-in
-    must (a) displace >= min_move × ATR and (b) ORIGINATE outside the base — its
-    origin close on the far side of the base from the leg-out (replaces the literal
-    base-containment inequality, which selected worse zones).
+    [User decision] The previous DYNAMIC backward trace (leg_pullback_atr
+    based) was REMOVED in favour of explicit parameters, mirroring how the
+    leg-out is tuned (zone_config.yaml → leg_in.lookback / leg_in.min_move_atr).
+
+    Measurement: net displacement from the OPEN of the first window candle to
+    the CLOSE of the last candle before the base, over the last `lookback`
+    candles:
+
+        net  = close[base_start - 1] - open[base_start - lookback]
+        disp = |net| / ATR        arr_dir = sign(net)
+
+    A leg-in is "valid" when disp >= min_move × ATR. Set min_move_atr to 0.0
+    to effectively disable the hard gate (any non-flat approach qualifies) —
+    the leg-in then only contributes its (down-weighted) quality component.
 
     Returns (has_arrival, dict: arr_dir, leg_in_disp, leg_in_candles,
              leg_in_velocity, arrival_cleanliness, origin_ok).
@@ -557,32 +530,28 @@ def _check_arrival(
     if end < 0 or avg_atr <= 0:
         return False, None
 
-    rev_dir = "down" if leg_out_dir == "up" else "up"   # reversal expectation
-    for arr_dir in (rev_dir, leg_out_dir):
-        leg = _trace_leg_in(opens, highs, lows, closes, volratios, end,
-                            arr_dir, avg_atr, n, max_len, pullback_atr)
-        if leg is None or leg["disp_atr"] < min_move:
-            continue
-        origin = leg["origin_close"]
-        origin_ok = (origin > base_top) if arr_dir == "down" else (origin < base_bottom)
-        s = leg["start_idx"]
-        m = end - s + 1
-        if m > 0:
-            if arr_dir == "down":
-                clean = float(np.sum(closes[s:end + 1] < opens[s:end + 1])) / m
-            else:
-                clean = float(np.sum(closes[s:end + 1] >= opens[s:end + 1])) / m
-        else:
-            clean = 0.0
-        return True, {
-            "arr_dir":             arr_dir,
-            "leg_in_disp":         leg["disp_atr"],
-            "leg_in_candles":      leg["candles"],
-            "leg_in_velocity":     leg["velocity"],
-            "arrival_cleanliness": round(clean, 4),
-            "origin_ok":           bool(origin_ok),
-        }
-    return False, None
+    s = max(0, end - max(int(lookback), 1) + 1)
+    m = end - s + 1
+    net  = float(closes[end] - opens[s])
+    disp = abs(net) / avg_atr
+    if net == 0.0 or disp < min_move:
+        return False, None
+
+    arr_dir   = "up" if net > 0 else "down"
+    origin    = float(opens[s])
+    origin_ok = (origin > base_top) if arr_dir == "down" else (origin < base_bottom)
+    if arr_dir == "down":
+        clean = float(np.sum(closes[s:end + 1] < opens[s:end + 1])) / m
+    else:
+        clean = float(np.sum(closes[s:end + 1] >= opens[s:end + 1])) / m
+    return True, {
+        "arr_dir":             arr_dir,
+        "leg_in_disp":         round(disp, 4),
+        "leg_in_candles":      m,
+        "leg_in_velocity":     round(disp / m, 4),
+        "arrival_cleanliness": round(clean, 4),
+        "origin_ok":           bool(origin_ok),
+    }
 
 
 # ── Priority 1 helper: Weekly timeframe ──────────────────────────────────────
@@ -911,7 +880,10 @@ def _score_zone(
     base_score     = max(1.0 - base_range_atr / base_denom, 0.0)
 
     # ── Arrival: momentum + cleanliness (the soft, folded-in majority) ────
-    arr_mom   = min(arrival_move_atr / (zcfg["arrival_min_move"] * 2.0), 1.0)
+    # Normalised against leg_in.min_move_atr (floored at 0.5 ATR so a 0.0
+    # "no-gate" setting doesn't make every arrival score saturate at 1.0).
+    arr_ref   = max(float(zcfg.get("leg_in", {}).get("min_move_atr", 0.0)), 0.5)
+    arr_mom   = min(arrival_move_atr / (arr_ref * 2.0), 1.0)
     arr_score = 0.7 * arr_mom + 0.3 * min(max(arrival_cleanliness, 0.0), 1.0)
 
     components: list[tuple[float, float]] = [
@@ -1071,9 +1043,8 @@ def _track_zone_status(zones: list[dict], df: pd.DataFrame, zcfg: dict) -> list[
 
     Statuses:
         'active'    — no tests, no invalidation
-        'tested'    — price has entered the zone at least once but not invalidated
-        'consumed'  — test_count >= max_test_count (zone likely exhausted)
-        'invalid'   — price closed beyond the zone boundary
+        'tested'    — price has entered the zone at least once but not broken
+        'broken'    — price closed beyond the zone boundary
 
     Invalidation modes (zone_config.yaml → invalidation_mode):
         'close'  — triggered when Close crosses the zone boundary
@@ -1084,8 +1055,7 @@ def _track_zone_status(zones: list[dict], df: pd.DataFrame, zcfg: dict) -> list[
     When using zones as features for ML, always use only status and test_count
     as they were known at time t, not at the end of the dataset.
     """
-    mode      = zcfg.get("invalidation_mode", "close")
-    max_tests = zcfg["max_test_count"]
+    mode = zcfg.get("invalidation_mode", "close")
 
     closes = df["Close"].values
     highs  = df["High"].values
@@ -1118,7 +1088,7 @@ def _track_zone_status(zones: list[dict], df: pd.DataFrame, zcfg: dict) -> list[
                 )
 
             if invalidated:
-                status            = "invalid"
+                status            = "broken"
                 invalidation_date = df.index[i]
                 break
 
@@ -1131,10 +1101,6 @@ def _track_zone_status(zones: list[dict], df: pd.DataFrame, zcfg: dict) -> list[
                 test_count    += 1
                 last_test_date = df.index[i]
                 in_zone        = True
-
-                if test_count >= max_tests:
-                    status = "consumed"
-                    break
             elif not price_in_zone:
                 in_zone = False
 
@@ -1244,7 +1210,11 @@ def detect(
     leg_max      = zcfg.get("departure_leg_max", 12)
     leg_disp     = zcfg.get("departure_leg_disp", 0.6)
     pullback     = zcfg.get("leg_pullback_atr", 0.6)
-    min_move      = zcfg["arrival_min_move"]
+    licfg         = zcfg.get("leg_in", {})
+    li_enabled    = bool(licfg.get("enabled", True))
+    li_lookback   = int(licfg.get("lookback", 5))
+    li_min_move   = float(licfg.get("min_move_atr",
+                          zcfg.get("arrival_min_move", 0.0)))  # legacy fallback
     arrival_mode  = zcfg.get("arrival_mode", "any")
     require_origin = zcfg.get("arrival_require_origin", False)
     require_bc    = zcfg.get("require_base_containment", True)
@@ -1278,11 +1248,17 @@ def detect(
         else:
             continue
 
-        # ── Arrival: dynamic leg-in + origin check (§3.3/§4) ──
+        # ── Arrival: fixed-window leg-in + origin check ──
+        # The leg-in is ALWAYS measured (the structure label and the CSV
+        # feature columns keep the same format either way). leg_in.enabled
+        # only controls whether it GATES zones and contributes to quality:
+        #   enabled: true  → arrival_mode gate + leg-in quality component
+        #   enabled: false → measured for labelling only (no gate, no score)
         has_arr, arr = _check_arrival(O, H, L, C, VR, base_start, dep_dir, top, bottom,
-                                      avg_atr, nrows, leg_max, pullback, min_move)
+                                      avg_atr, nrows, li_lookback,
+                                      li_min_move if li_enabled else 0.0)
         arr_dir = arr["arr_dir"] if has_arr else None
-        if arrival_mode == "reversal":
+        if li_enabled and arrival_mode == "reversal":
             opposite = has_arr and (
                 (dep_dir == "up" and arr_dir == "down") or
                 (dep_dir == "down" and arr_dir == "up"))
@@ -1290,29 +1266,59 @@ def detect(
                 continue
             if require_origin and not arr["origin_ok"]:
                 continue
-        elif arrival_mode == "any":
+        elif li_enabled and arrival_mode == "any":
             if not has_arr:
                 continue
 
-        d_char    = "R" if dep_dir == "up" else "D"
-        structure = (f"{'R' if arr_dir == 'up' else 'D'}B{d_char}") if has_arr else f"B{d_char}"
+        # Structure label is ALWAYS the full 3-letter form (DBR/RBD/RBR/DBD) —
+        # downstream consumers (web app) rely on this format. In the rare case
+        # the leg-in nets to exactly zero, assume the classic reversal arrival.
+        d_char = "R" if dep_dir == "up" else "D"
+        if has_arr:
+            structure = f"{'R' if arr_dir == 'up' else 'D'}B{d_char}"
+        else:
+            structure = ("D" if d_char == "R" else "R") + "B" + d_char
 
-        # ── Base-containment gate ──────────────────────────────
-        # The base must sit inside the imbalance, between the prior candle's OPEN
-        # and the first leg-out candle's CLOSE:
-        #   DBR (demand): base HIGH < open[prev candle]  AND  base HIGH < close[next candle]
-        #   RBD (supply): base LOW  > open[prev candle]  AND  base LOW  > close[next candle]
+        # ── Base-containment gate (direction-aware) ─────────────
+        # The base must sit inside the imbalance. The departure-side check is
+        # the same for all structures (first leg-out close clears the base);
+        # the arrival-side check depends on which way the leg-in came:
+        #   DBR (demand, reversal):     base HIGH < open[prev]  (arrival dropped in from above)
+        #   RBD (supply, reversal):     base LOW  > open[prev]  (arrival rallied in from below)
+        #   RBR (demand, continuation): base LOW  > open[prev]  (arrival rallied in from below)
+        #   DBD (supply, continuation): base HIGH < open[prev]  (arrival dropped in from above)
         if require_bc:
             prev_idx  = base_start - 1
             first_dep = dep_info["first_idx"]            # = base_end + 1
             if prev_idx < 0 or first_dep >= nrows:
                 continue
-            if zone_type == "demand":
-                if not (top < O[prev_idx] and top < C[first_dep]):
-                    continue
+            # containment_price (zone_config.yaml):
+            #   "body" → contain the base BODIES only (wicks may poke out).
+            #            Sweep wicks are REJECTION, not acceptance — a long
+            #            sweep wick should not disqualify an otherwise clean
+            #            base (e.g. SONATSOFTW Jun-2022 quarterly demand).
+            #   "wick" → strict: the full candle range must be contained.
+            bb_c = slice(base_start, base_end + 1)
+            if zcfg.get("containment_price", "wick") == "body":
+                c_top = float(np.max(np.maximum(O[bb_c], C[bb_c])))
+                c_bot = float(np.min(np.minimum(O[bb_c], C[bb_c])))
             else:
-                if not (bottom > O[prev_idx] and bottom > C[first_dep]):
-                    continue
+                c_top, c_bot = top, bottom
+            # Departure side: first leg-out close must clear the base.
+            if zone_type == "demand":
+                dep_ok = c_top < C[first_dep]
+            else:
+                dep_ok = c_bot > C[first_dep]
+            # Arrival side: base must sit beyond the arrival candle's open
+            # in the arrival's direction of travel.
+            if arr_dir is None:
+                arr_ok = True            # bare base→leg-out (arrival_mode "optional")
+            elif arr_dir == "down":
+                arr_ok = c_top < O[prev_idx]
+            else:                        # arr_dir == "up"
+                arr_ok = c_bot > O[prev_idx]
+            if not (dep_ok and arr_ok):
+                continue
 
         dep_idx        = dep_info["dep_idx"]
         base_vol_ratio = _get_base_volume_ratio(df, base_start, base_end)
@@ -1345,11 +1351,12 @@ def detect(
             dep_close_ratio=dep_info["dep_close_ratio"], dep_volume_ratio=dep_info["dep_volume_ratio"],
             base_volume_ratio=base_vol_ratio, base_range=base_range, avg_atr=avg_atr,
             arrival_move_atr=leg_in_disp if has_arr else 0.0, arrival_cleanliness=arr_clean,
-            has_arrival=has_arr, trend_score=trend_sc, zcfg=zcfg)
+            has_arrival=(has_arr and li_enabled), trend_score=trend_sc, zcfg=zcfg)
         quality01 = _quality_score(
             base_length=base["length"], base_wick_frac=wick_frac, leg_out_clear=leg_out_clear,
             leg_out_disp=leg_out_disp, leg_in_velocity=leg_in_vel, arrival_cleanliness=arr_clean,
-            has_arrival=has_arr, disp_base_ratio=disp_base, leg_out_vol_exp=dep_info["leg_out_vol_exp"],
+            has_arrival=(has_arr and li_enabled),  # leg-in scored only when enabled
+            disp_base_ratio=disp_base, leg_out_vol_exp=dep_info["leg_out_vol_exp"],
             base_volume_ratio=base_vol_ratio, trend_score=trend_sc, zcfg=zcfg)
 
         if quality01 < min_q:
@@ -1469,7 +1476,10 @@ def detect(
     # In reversal mode only the two reversal structures are ever produced
     # (arrival opposite to the leg-out). This is a hard safety net so a stray
     # config change can never leak RBR/DBD continuation zones into the output.
-    if zcfg.get("arrival_mode", "any") == "reversal" and "structure" in result.columns:
+    # (Skipped when leg_in.enabled is false — no arrival info exists then.)
+    if (zcfg.get("leg_in", {}).get("enabled", True)
+            and zcfg.get("arrival_mode", "any") == "reversal"
+            and "structure" in result.columns):
         keep = result["structure"].isin(["DBR", "RBD"])
         if (~keep).any():
             if logger:
@@ -1491,8 +1501,7 @@ def _log_summary(zones: pd.DataFrame, logger: logging.Logger):
     n_supply     = (zones["type"] == "supply").sum()
     n_active     = (zones["status"] == "active").sum()
     n_tested     = (zones["status"] == "tested").sum()
-    n_consumed   = (zones["status"] == "consumed").sum()
-    n_invalid    = (zones["status"] == "invalid").sum()
+    n_broken     = (zones["status"] == "broken").sum()
     n_weekly     = zones.get("weekly_confirmed", pd.Series(dtype=bool)).sum()
     n_wfresh     = zones.get("weekly_zone_fresh", pd.Series(dtype=bool)).sum()
     avg_conf     = zones.get("weekly_confluence_score", pd.Series(dtype=float)).mean()
@@ -1505,8 +1514,7 @@ def _log_summary(zones: pd.DataFrame, logger: logging.Logger):
     logger.info(f"  Demand / Supply      : {n_demand} / {n_supply}")
     logger.info(f"  Active               : {n_active}")
     logger.info(f"  Tested               : {n_tested}")
-    logger.info(f"  Consumed             : {n_consumed}")
-    logger.info(f"  Invalid              : {n_invalid}")
+    logger.info(f"  Broken               : {n_broken}")
     logger.info(f"  In weekly zone       : {n_weekly} (fresh weekly: {n_wfresh})")
     logger.info(f"  Avg weekly confluence: {avg_conf:.3f}")
     logger.info(f"  Avg raw strength     : {avg_strength:.3f}")
